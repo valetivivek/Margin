@@ -281,14 +281,19 @@ struct EdgeDeckView: View {
         }
         .buttonStyle(.plain)
         .frame(width: DeckCardMetrics.bottomStep, height: 210, alignment: .bottom)
-        .contentShape(Rectangle())
-        .onContinuousHover { phase in
-            switch phase {
-            case .active where settings.fanMode == .hover && DeckHoverGate.isReady(now: ProcessInfo.processInfo.systemUptime, readyAt: hoverReadyAt): hovered = note.id
-            case .ended where settings.fanMode == .hover && hovered == note.id: hovered = nil
-            default: break
+        .overlay(alignment: .bottom) {
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(width: lifted ? DeckCardMetrics.contentWidth : DeckCardMetrics.bottomStep, height: 210)
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active where settings.fanMode == .hover && DeckHoverGate.isReady(now: ProcessInfo.processInfo.systemUptime, readyAt: hoverReadyAt): hovered = note.id
+                    case .ended where settings.fanMode == .hover && hovered == note.id: hovered = nil
+                    default: break
+                    }
+                }
+                .onTapGesture { activate(note, lifted: lifted) }
             }
-        }
         .contextMenu { noteMenu(current) }
         .zIndex(lifted ? 20 : Double(index))
         .animation(reduceMotion ? nil : .easeOut(duration: settings.cardDuration), value: lifted)
