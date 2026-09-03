@@ -379,15 +379,21 @@ final class AppCoordinator {
 
     func rebuildPanels() {
         edges.values.forEach { $0.close() }; edges.removeAll()
-        for screen in NSScreen.screens {
+        for screen in Self.targetScreens(from: NSScreen.screens, main: NSScreen.main, showOnAll: settings.showOnAllScreens) {
             let controller = EdgePanelController(screen: screen, store: store, settings: settings, coordinator: self)
             edges[ObjectIdentifier(screen)] = controller
         }
     }
 
     func refreshPanels() {
+        let screenCount = Self.targetScreens(from: NSScreen.screens, main: NSScreen.main, showOnAll: settings.showOnAllScreens).count
+        if edges.count != screenCount { rebuildPanels(); return }
         edges.values.forEach { $0.refresh() }
         editors.values.forEach { $0.refreshCollectionBehavior() }
+    }
+
+    static func targetScreens<Screen>(from screens: [Screen], main: Screen?, showOnAll: Bool) -> [Screen] {
+        showOnAll ? screens : main.map { [$0] } ?? Array(screens.prefix(1))
     }
 
     func showDeck() { edges.values.forEach { $0.setExpanded(true) } }
@@ -608,6 +614,10 @@ enum AppSelfCheck {
         guard AppDelegate.activationPolicy(showInDock: false, uiTest: false) == .accessory,
               AppDelegate.activationPolicy(showInDock: true, uiTest: false) == .regular else {
             throw SelfCheckFailure("Dock visibility does not map to the app activation policy")
+        }
+        guard AppCoordinator.targetScreens(from: [1, 2], main: 1, showOnAll: true) == [1, 2],
+              AppCoordinator.targetScreens(from: [1, 2], main: 1, showOnAll: false) == [1] else {
+            throw SelfCheckFailure("Display scope does not select all screens or only the main screen")
         }
         guard ChecklistNSTextView.links(in: "Visit https://example.com now").first?.0.absoluteString == "https://example.com" else {
             throw SelfCheckFailure("URLs are not recognized in note text")

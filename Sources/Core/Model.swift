@@ -63,6 +63,7 @@ final class AppSettings: ObservableObject {
     @Published var cloudSyncEnabled: Bool { didSet { save("cloudSyncEnabled", cloudSyncEnabled) } }
     @Published var cloudSyncBookmark: Data? { didSet { save("cloudSyncBookmark", cloudSyncBookmark) } }
     @Published var showInDock: Bool { didSet { save("showInDock", showInDock) } }
+    @Published var showOnAllScreens: Bool { didSet { save("showOnAllScreens", showOnAllScreens) } }
     @Published var showOverFullScreen: Bool { didSet { save("showOverFullScreen", showOverFullScreen) } }
     @Published var lockNotes: Bool { didSet { save("lockNotes", lockNotes) } }
     @Published var appearance: AppearanceMode { didSet { save("appearance", appearance.rawValue) } }
@@ -88,6 +89,7 @@ final class AppSettings: ObservableObject {
         cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         cloudSyncBookmark = defaults.data(forKey: "cloudSyncBookmark")
         showInDock = defaults.bool(forKey: "showInDock")
+        showOnAllScreens = defaults.object(forKey: "showOnAllScreens") as? Bool ?? true
         showOverFullScreen = defaults.bool(forKey: "showOverFullScreen")
         lockNotes = defaults.bool(forKey: "lockNotes")
         let savedAppearance = defaults.string(forKey: "appearance")

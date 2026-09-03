@@ -1412,6 +1412,7 @@ struct SettingsView: View {
             heading("System", "Control how Margin behaves on your Mac.")
             settingsSection("Windows") {
                 settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(appAccent) }
+                settingRow("Show on all displays", "Turn off to keep the deck on the main display only") { Toggle("Show on all displays", isOn: $settings.showOnAllScreens).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(appAccent) }
             }

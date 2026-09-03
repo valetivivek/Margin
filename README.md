@@ -13,6 +13,7 @@ Margin is a native, local-first sticky-note deck for macOS. Notes stay near a sc
 - Optional Markdown folder sync
 - Configurable global shortcut and animation speed
 - Menu-bar access with an optional Dock icon
+- Deck visibility on all displays or only the main display
 - Light appearance by default, with system and dark options
 
 ## Install
