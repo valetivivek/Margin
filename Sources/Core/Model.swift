@@ -278,12 +278,6 @@ final class NoteDatabase {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errmsg(db))) }
     }
 
-    func markDeleted(_ note: Note) throws {
-        var value = note
-        value.deletedAt = Date()
-        try save(value)
-    }
-
     private func bind(_ value: Date?, to index: Int32, in statement: OpaquePointer?) {
         if let value { sqlite3_bind_double(statement, index, value.timeIntervalSince1970) } else { sqlite3_bind_null(statement, index) }
     }
@@ -377,6 +371,10 @@ final class NotesStore: ObservableObject {
 
     func flush(_ id: UUID) {
         if let draft = drafts[id] { update(draft, immediate: true) }
+    }
+
+    func flushAll() {
+        for id in Array(drafts.keys) { flush(id) }
     }
 
     func archive(_ id: UUID) {
@@ -516,7 +514,8 @@ enum SelfCheck {
         let imported = try JSONDecoder.hmn.decode(StickyArchive.self, from: archive)
         precondition(imported.notes[0].title == "Round trip")
 
-        try db.markDeleted(note)
+        note.deletedAt = Date()
+        try db.save(note)
         let remaining = try db.load()
         precondition(remaining.isEmpty)
         let includingDeleted = try db.load(includeDeleted: true)
@@ -587,6 +586,12 @@ enum SelfCheck {
         guard store.active.first(where: { $0.id == edited.id })?.body == "keystroke 99",
               try editDB.load().first(where: { $0.id == edited.id })?.body == "keystroke 99" else {
             throw SelfCheckFailure("Closing an editor does not flush its pending draft")
+        }
+        edited.body = "saved before update"
+        store.update(edited)
+        store.flushAll()
+        guard try editDB.load().first(where: { $0.id == edited.id })?.body == "saved before update" else {
+            throw SelfCheckFailure("Quitting for an update loses pending note edits")
         }
         print("Margin self-check passed")
     }

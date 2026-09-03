@@ -195,17 +195,19 @@ final class EdgePanelController: NSWindowController {
 final class StickyWindowController: NSWindowController, NSWindowDelegate {
     let noteID: UUID
     private let store: NotesStore
-    private let screen: NSScreen
     private let settings: AppSettings
     private var deckFrame = NSRect.zero
     private var isDismissing = false
     private var remembersMoves = false
     private var escapeMonitor: Any?
 
+    static func shouldRememberMove(hasFinishedOpening: Bool, isDismissing: Bool) -> Bool {
+        hasFinishedOpening && !isDismissing
+    }
+
     init(note: Note, screen: NSScreen, store: NotesStore, settings: AppSettings, coordinator: AppCoordinator) {
         noteID = note.id
         self.store = store
-        self.screen = screen
         self.settings = settings
         let panel = KeyPanel(contentRect: .zero, styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
         super.init(window: panel)
@@ -333,7 +335,8 @@ final class StickyWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard remembersMoves, let frame = window?.frame else { return }
+        guard Self.shouldRememberMove(hasFinishedOpening: remembersMoves, isDismissing: isDismissing),
+              let frame = window?.frame else { return }
         settings.rememberNotePosition(x: frame.origin.x, y: frame.origin.y)
         guard var note = store.note(noteID), note.pinned else { return }
         note.pinX = frame.origin.x; note.pinY = frame.origin.y
@@ -608,6 +611,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func statusSideRight(_ sender: Any?) { settings.side = .right }
     @objc private func statusSideBottom(_ sender: Any?) { settings.side = .bottom }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        store.flushAll()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
@@ -631,6 +638,10 @@ enum AppSelfCheck {
         guard AppCoordinator.targetScreens(from: [1, 2], main: 1, showOnAll: true) == [1, 2],
               AppCoordinator.targetScreens(from: [1, 2], main: 1, showOnAll: false) == [1] else {
             throw SelfCheckFailure("Display scope does not select all screens or only the main screen")
+        }
+        guard StickyWindowController.shouldRememberMove(hasFinishedOpening: true, isDismissing: false),
+              !StickyWindowController.shouldRememberMove(hasFinishedOpening: true, isDismissing: true) else {
+            throw SelfCheckFailure("Closing a note overwrites its remembered window position")
         }
         guard Bundle.main.object(forInfoDictionaryKey: "SUEnableAutomaticChecks") as? Bool == true,
               Bundle.main.object(forInfoDictionaryKey: "SUAutomaticallyUpdate") as? Bool == true,
@@ -660,6 +671,21 @@ enum AppSelfCheck {
         guard ChecklistLine.toggled("- [ ] shipped") == "- [x] ~~shipped~~",
               ChecklistLine.toggled("- [x] ~~shipped~~") == "- [ ] shipped" else {
             throw SelfCheckFailure("Checklist completion does not preserve the stored syntax")
+        }
+        let checkmark = ChecklistMarkGeometry.points(in: NSRect(x: 0, y: 0, width: 16, height: 16))
+        guard checkmark.middle.y > checkmark.start.y, checkmark.end.y < checkmark.middle.y else {
+            throw SelfCheckFailure("Completed checklist items draw an inverted checkmark")
+        }
+        guard SettingsView.visibleVersion(shortVersion: "1.0.2") == "1.0.2" else {
+            throw SelfCheckFailure("The About screen exposes the internal build number")
+        }
+        guard contrastRatio(MarginPalette.accent(isDark: true), MarginPalette.accentForeground(isDark: true)) >= 4.5,
+              contrastRatio(MarginPalette.accent(isDark: true), MarginPalette.selectionSurface(isDark: true)) >= 4.5,
+              contrastRatio(MarginPalette.selectionBorder(isDark: true), MarginPalette.selectionSurface(isDark: true)) >= 3,
+              contrastRatio(MarginPalette.accent(isDark: false), MarginPalette.accentForeground(isDark: false)) >= 4.5,
+              contrastRatio(MarginPalette.accent(isDark: false), MarginPalette.selectionSurface(isDark: false)) >= 4.5,
+              contrastRatio(MarginPalette.selectionBorder(isDark: false), MarginPalette.selectionSurface(isDark: false)) >= 3 else {
+            throw SelfCheckFailure("Selected controls do not have enough contrast")
         }
         guard !DeckHoverGate.isReady(now: 1, readyAt: 2), DeckHoverGate.isReady(now: 2, readyAt: 2) else {
             throw SelfCheckFailure("Deck hover activates before the fan settles")
@@ -733,5 +759,21 @@ enum AppSelfCheck {
         guard editor.string == "- [ ] ", editor.selectedRange().location == 6 else {
             throw SelfCheckFailure("Typing [] does not start a checklist")
         }
+    }
+
+    private static func contrastRatio(_ first: NSColor, _ second: NSColor) -> CGFloat {
+        let firstLuminance = relativeLuminance(first)
+        let secondLuminance = relativeLuminance(second)
+        return (max(firstLuminance, secondLuminance) + 0.05) / (min(firstLuminance, secondLuminance) + 0.05)
+    }
+
+    private static func relativeLuminance(_ color: NSColor) -> CGFloat {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return 0 }
+        let convert: (CGFloat) -> CGFloat = { value in
+            value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * convert(rgb.redComponent)
+            + 0.7152 * convert(rgb.greenComponent)
+            + 0.0722 * convert(rgb.blueComponent)
     }
 }

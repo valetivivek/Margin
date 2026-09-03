@@ -19,8 +19,41 @@ private let appSearch = Color(nsColor: NSColor(name: nil) { appearance in
         ? NSColor(calibratedWhite: 0.20, alpha: 1)
         : NSColor(red: 227 / 255, green: 227 / 255, blue: 219 / 255, alpha: 1)
 })
-private let appAccent = Color.primary
-private let appAccentForeground = Color(nsColor: .windowBackgroundColor)
+enum MarginPalette {
+    static func accent(isDark: Bool) -> NSColor {
+        isDark
+            ? NSColor(srgbRed: 116 / 255, green: 166 / 255, blue: 255 / 255, alpha: 1)
+            : NSColor(srgbRed: 54 / 255, green: 99 / 255, blue: 205 / 255, alpha: 1)
+    }
+
+    static func accentForeground(isDark: Bool) -> NSColor {
+        isDark
+            ? NSColor(srgbRed: 11 / 255, green: 20 / 255, blue: 38 / 255, alpha: 1)
+            : .white
+    }
+
+    static func selectionSurface(isDark: Bool) -> NSColor {
+        isDark
+            ? NSColor(srgbRed: 38 / 255, green: 53 / 255, blue: 80 / 255, alpha: 1)
+            : NSColor(srgbRed: 228 / 255, green: 236 / 255, blue: 255 / 255, alpha: 1)
+    }
+
+    static func selectionBorder(isDark: Bool) -> NSColor {
+        isDark
+            ? NSColor(srgbRed: 98 / 255, green: 134 / 255, blue: 189 / 255, alpha: 1)
+            : NSColor(srgbRed: 94 / 255, green: 127 / 255, blue: 199 / 255, alpha: 1)
+    }
+
+    static let accent = NSColor(name: nil) { accent(isDark: $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua) }
+    static let accentForeground = NSColor(name: nil) { accentForeground(isDark: $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua) }
+    static let selectionSurface = NSColor(name: nil) { selectionSurface(isDark: $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua) }
+    static let selectionBorder = NSColor(name: nil) { selectionBorder(isDark: $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua) }
+}
+
+private let appAccent = Color(nsColor: MarginPalette.accent)
+private let appAccentForeground = Color(nsColor: MarginPalette.accentForeground)
+private let appSelectionSurface = Color(nsColor: MarginPalette.selectionSurface)
+private let appSelectionBorder = Color(nsColor: MarginPalette.selectionBorder)
 
 private let noteFontNames = [
     "Virgil", "Caveat", "Comic Neue", "Bradley Hand", "Chalkboard SE", "Marker Felt", "Noteworthy",
@@ -716,7 +749,8 @@ final class ChecklistNSTextView: NSTextView {
             NSColor.black.withAlphaComponent(0.42).setStroke(); path.lineWidth = 1.5; path.stroke()
             if prefix == "- [x] " {
                 NSColor.black.withAlphaComponent(0.52).setFill(); path.fill()
-                let mark = NSBezierPath(); mark.move(to: NSPoint(x: rect.minX + 3.5, y: rect.midY)); mark.line(to: NSPoint(x: rect.midX - 0.5, y: rect.minY + 4)); mark.line(to: NSPoint(x: rect.maxX - 3, y: rect.maxY - 4))
+                let points = ChecklistMarkGeometry.points(in: rect)
+                let mark = NSBezierPath(); mark.move(to: points.start); mark.line(to: points.middle); mark.line(to: points.end)
                 NSColor.white.setStroke(); mark.lineWidth = 1.8; mark.stroke()
             }
             _ = textContainer
@@ -755,6 +789,16 @@ final class ChecklistNSTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { cancelled?(); return }
         super.keyDown(with: event)
+    }
+}
+
+struct ChecklistMarkGeometry {
+    static func points(in rect: NSRect) -> (start: NSPoint, middle: NSPoint, end: NSPoint) {
+        (
+            NSPoint(x: rect.minX + 3.5, y: rect.midY),
+            NSPoint(x: rect.midX - 0.5, y: rect.maxY - 4),
+            NSPoint(x: rect.maxX - 3, y: rect.minY + 4)
+        )
     }
 }
 
@@ -955,11 +999,18 @@ struct AllNotesView: View {
     }
 
     private func filterButton(_ value: NoteFilter) -> some View {
-        Button(value.rawValue) { filter = value; focused = nil; selected.removeAll() }
+        let isSelected = filter == value
+        return Button { filter = value; focused = nil; selected.removeAll() } label: {
+            HStack(spacing: 5) {
+                if isSelected { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
+                Text(value.rawValue)
+            }
+        }
             .buttonStyle(HoverButtonStyle()).font(.system(size: 12, weight: filter == value ? .semibold : .regular))
-            .foregroundStyle(filter == value ? appAccent : .secondary)
+            .foregroundStyle(isSelected ? appAccentForeground : .secondary)
             .padding(.horizontal, 11).frame(height: 27)
-            .background(filter == value ? appAccent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 7))
+            .background(isSelected ? appAccent : .clear, in: RoundedRectangle(cornerRadius: 7))
+            .accessibilityValue(isSelected ? "Selected" : "Not selected")
     }
 
     private func noteRow(_ note: Note) -> some View {
@@ -977,7 +1028,8 @@ struct AllNotesView: View {
             }
         }
         .padding(.vertical, 7).padding(.horizontal, 7).contentShape(Rectangle())
-        .background((focused == note.id || selected.contains(note.id)) ? appAccent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .background((focused == note.id || selected.contains(note.id)) ? appSelectionSurface : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke((focused == note.id || selected.contains(note.id)) ? appSelectionBorder : .clear, lineWidth: 1))
     }
 
     private func previewPane(_ note: Note) -> some View {
@@ -1036,13 +1088,17 @@ struct AllNotesView: View {
     }
 
     private func exportOption(_ format: ExportFormat) -> some View {
-        Button { exportFormat = format } label: {
+        let isSelected = exportFormat == format
+        return Button { exportFormat = format } label: {
             HStack(spacing: 9) {
-                Circle().stroke(.black.opacity(0.24), lineWidth: 1.5).frame(width: 15, height: 15)
-                    .overlay(Circle().fill(appAccent).frame(width: 7, height: 7).opacity(exportFormat == format ? 1 : 0))
+                Circle().stroke(isSelected ? appAccent : Color.primary.opacity(0.32), lineWidth: 1.5).frame(width: 15, height: 15)
+                    .overlay(Circle().fill(appAccent).frame(width: 7, height: 7).opacity(isSelected ? 1 : 0))
                 Text(format.title).font(.system(size: 12, weight: .semibold)); Text("— \(format.detail)").font(.caption).foregroundStyle(.secondary); Spacer()
-            }.padding(.horizontal, 10).frame(height: 34).background(exportFormat == format ? Color.primary.opacity(0.055) : .clear, in: RoundedRectangle(cornerRadius: 8))
-        }.buttonStyle(HoverButtonStyle())
+            }
+            .padding(.horizontal, 10).frame(height: 34)
+            .background(isSelected ? appSelectionSurface : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(isSelected ? appSelectionBorder : .clear, lineWidth: 1))
+        }.buttonStyle(HoverButtonStyle()).accessibilityValue(isSelected ? "Selected" : "Not selected")
     }
 }
 
@@ -1157,7 +1213,8 @@ struct ArchiveView: View {
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
             }
         }.padding(.vertical, 7).padding(.horizontal, 7).contentShape(Rectangle())
-            .background(focused == note.id ? appAccent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .background(focused == note.id ? appSelectionSurface : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused == note.id ? appSelectionBorder : .clear, lineWidth: 1))
     }
 
     private func archiveStatus(_ note: Note) -> String {
@@ -1288,11 +1345,58 @@ private struct ShortcutRecorder: NSViewRepresentable {
     }
 }
 
+private struct AccentSegmentedPicker<Value: Hashable>: NSViewRepresentable {
+    @Binding var selection: Value
+    let options: [(value: Value, label: String)]
+    let accessibilityLabel: String
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(
+            labels: options.map(\.label), trackingMode: .selectOne,
+            target: context.coordinator, action: #selector(Coordinator.changed(_:))
+        )
+        control.segmentDistribution = .fill
+        control.selectedSegmentBezelColor = MarginPalette.accent
+        control.setAccessibilityLabel(accessibilityLabel)
+        updateNSView(control, context: context)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.selection = $selection
+        context.coordinator.values = options.map(\.value)
+        control.selectedSegment = options.firstIndex { $0.value == selection } ?? -1
+        control.selectedSegmentBezelColor = MarginPalette.accent
+        for (index, option) in options.enumerated() { control.setLabel(option.label, forSegment: index) }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection, values: options.map(\.value))
+    }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<Value>
+        var values: [Value]
+
+        init(selection: Binding<Value>, values: [Value]) {
+            self.selection = selection
+            self.values = values
+        }
+
+        @objc func changed(_ sender: NSSegmentedControl) {
+            guard values.indices.contains(sender.selectedSegment) else { return }
+            selection.wrappedValue = values[sender.selectedSegment]
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var cloudSync: CloudSyncController
     let updater: SPUUpdater
     @State private var tab = SettingsTab.general
+
+    static func visibleVersion(shortVersion: String) -> String { shortVersion }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1321,27 +1425,32 @@ struct SettingsView: View {
     private func sidebarHeading(_ title: String) -> some View { Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.9).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.bottom, 5) }
 
     private func tabButton(_ value: SettingsTab, _ icon: String) -> some View {
-        Button { tab = value } label: {
+        let isSelected = tab == value
+        return Button { tab = value } label: {
             HStack(spacing: 9) {
                 Image(systemName: icon).font(.system(size: 13, weight: .medium)).frame(width: 18)
-                Text(value.rawValue).font(.system(size: 13, weight: tab == value ? .semibold : .regular))
+                Text(value.rawValue).font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                Spacer(minLength: 0)
+                if isSelected { Image(systemName: "checkmark.circle.fill").font(.system(size: 12, weight: .semibold)) }
             }
-                .foregroundStyle(.primary)
+                .foregroundStyle(isSelected ? appAccent : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10).frame(height: 36)
-                .background(tab == value ? Color.primary.opacity(0.075) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                .background(isSelected ? appSelectionSurface : .clear, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(isSelected ? appSelectionBorder : .clear, lineWidth: 1))
         }
         .buttonStyle(HoverButtonStyle())
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
     }
 
     private var general: some View {
         VStack(alignment: .leading, spacing: 22) {
             heading("General", "How the deck looks and behaves.")
             settingsSection("Deck") {
-                settingRow("Screen side", "Which edge the deck lives on") { Picker("", selection: $settings.side) { Text("Left").tag(ScreenSide.left); Text("Right").tag(ScreenSide.right); Text("Bottom").tag(ScreenSide.bottom) }.pickerStyle(.segmented).frame(width: 190) }
-                settingRow("Fan notes", "Hovering always fans the deck; this is what opens a card") { Picker("", selection: $settings.fanMode) { Text("On hover").tag(FanMode.hover); Text("On click").tag(FanMode.click) }.pickerStyle(.segmented).frame(width: 160) }
+                settingRow("Screen side", "Which edge the deck lives on") { AccentSegmentedPicker(selection: $settings.side, options: [(.left, "Left"), (.right, "Right"), (.bottom, "Bottom")], accessibilityLabel: "Screen side").frame(width: 190, height: 28) }
+                settingRow("Fan notes", "Hovering always fans the deck; this is what opens a card") { AccentSegmentedPicker(selection: $settings.fanMode, options: [(.hover, "On hover"), (.click, "On click")], accessibilityLabel: "Fan notes").frame(width: 160, height: 28) }
                 settingRow("Keep the deck open", "The deck stays at the edge instead of resting as the dots") { Toggle("Keep the deck open", isOn: $settings.keepOpen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
-                settingRow("Animation speed", "How briskly the deck moves", divider: false) { Picker("", selection: $settings.animationSpeed) { Text("Fast").tag(AnimationSpeed.fast); Text("Normal").tag(AnimationSpeed.normal); Text("Slow").tag(AnimationSpeed.slow) }.pickerStyle(.segmented).frame(width: 195) }
+                settingRow("Animation speed", "How briskly the deck moves", divider: false) { AccentSegmentedPicker(selection: $settings.animationSpeed, options: [(.fast, "Fast"), (.normal, "Normal"), (.slow, "Slow")], accessibilityLabel: "Animation speed").frame(width: 195, height: 28) }
             }
         }
     }
@@ -1418,17 +1527,6 @@ struct SettingsView: View {
                 settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(appAccent) }
             }
-            settingsSection("Updates") {
-                settingRow("Automatic updates", "Check, download, and install new versions automatically") {
-                    Toggle("Automatic updates", isOn: Binding(
-                        get: { updater.automaticallyChecksForUpdates && updater.automaticallyDownloadsUpdates },
-                        set: { updater.automaticallyChecksForUpdates = $0; updater.automaticallyDownloadsUpdates = $0 }
-                    )).toggleStyle(.switch).labelsHidden().tint(appAccent)
-                }
-                settingRow("Check now", "Look for a new version manually", divider: false) {
-                    Button("Check Now") { updater.checkForUpdates() }.buttonStyle(MatteButtonStyle()).fixedSize()
-                }
-            }
         }
     }
 
@@ -1437,23 +1535,21 @@ struct SettingsView: View {
             heading("Appearance", "Choose how Margin looks.")
             settingsSection("Interface") {
                 settingRow("Theme", "Follow the Mac or choose a fixed appearance", divider: false) {
-                    Picker("", selection: $settings.appearance) {
-                        Text("Light").tag(AppearanceMode.light)
-                        Text("System").tag(AppearanceMode.system)
-                        Text("Dark").tag(AppearanceMode.dark)
-                    }.pickerStyle(.segmented).frame(width: 210)
+                    AccentSegmentedPicker(selection: $settings.appearance, options: [(.light, "Light"), (.system, "System"), (.dark, "Dark")], accessibilityLabel: "Theme").frame(width: 210, height: 28)
                 }
             }
         }
     }
 
     private func colorButton(_ value: NoteColor) -> some View {
-        Button { settings.defaultColor = value } label: {
+        let isSelected = settings.defaultColor == value
+        return Button { settings.defaultColor = value } label: {
             RoundedRectangle(cornerRadius: 6).fill(value.color).frame(width: 20, height: 20)
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(settings.defaultColor == value ? 0.65 : 0), lineWidth: 2.5).padding(-5))
+                .overlay { if isSelected { Image(systemName: "checkmark").font(.system(size: 10, weight: .heavy)).foregroundStyle(.black.opacity(0.72)) } }
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? appAccent : .clear, lineWidth: 2.5).padding(-5))
                 .frame(width: 25, height: 25)
         }.buttonStyle(HoverButtonStyle()).disabled(!settings.useDefaultColor).opacity(settings.useDefaultColor ? 1 : 0.38)
-            .accessibilityLabel("\(value.name) default note color")
+            .accessibilityLabel("\(value.name) default note color").accessibilityValue(isSelected ? "Selected" : "Not selected")
     }
 
     private var about: some View {
@@ -1472,13 +1568,23 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 12)
             }
+            settingsSection("Updates") {
+                settingRow("Automatic updates", "Check, download, and install new versions automatically") {
+                    Toggle("Automatic updates", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates && updater.automaticallyDownloadsUpdates },
+                        set: { updater.automaticallyChecksForUpdates = $0; updater.automaticallyDownloadsUpdates = $0 }
+                    )).toggleStyle(.switch).labelsHidden().tint(appAccent)
+                }
+                settingRow("Check now", "Look for a new version manually", divider: false) {
+                    Button("Check Now") { updater.checkForUpdates() }.buttonStyle(MatteButtonStyle()).fixedSize()
+                }
+            }
         }
     }
 
     private var versionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "\(version) (\(build))"
+        return Self.visibleVersion(shortVersion: version)
     }
 
     private func heading(_ title: String, _ subtitle: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.system(size: 29, weight: .medium, design: .serif)); Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary) } }

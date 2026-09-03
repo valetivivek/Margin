@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3 - 2026-09-03
+
+- Preserve the last editor position when a note closes instead of recording the close animation.
+- Flush pending edits before Margin quits or relaunches to install an update.
+- Draw completed checklist checkmarks in the correct direction.
+- Show only the public app version in About while retaining the internal build number for update ordering.
+- Fail release validation when update downloads would be inaccessible to installed apps.
+- Make selected tabs, options, rows, filters, and toggles clearly visible in dark mode with an accessible blue accent.
+- Move automatic-update controls from System to the Info tab.
+
 ## 1.0.2 - 2026-09-02
 
 - Reopen the last-used note at its saved screen position when Margin launches.

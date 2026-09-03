@@ -38,10 +38,10 @@
 - **Focused editor** — autosave, checklists, clickable links, colors, and pinning.
 - **Full library** — search, archive, restore, import, and export your notes.
 - **Your displays, your choice** — show Margin on every display or only the main one.
-- **Automatic updates** — receive signed releases automatically, or opt out in Settings.
+- **Automatic updates** — receive signed releases automatically, or manage updates in **Settings → Info → About**.
 - **Optional sync** — write readable Markdown files to a folder you control.
 - **Quiet when needed** — keep Margin in the menu bar without a Dock icon.
-- **Comfortable in any theme** — light by default, with system and dark appearances.
+- **Comfortable in any theme** — light by default, with system and dark appearances plus high-contrast selected states.
 
 ## Quick start
 
@@ -62,6 +62,20 @@ Margin requires macOS 13 Ventura or newer.
 | `⌘⌫` | Delete the current note |
 
 The quick-capture shortcut and its action can be changed in **Settings → Shortcuts**.
+
+## Settings
+
+Open **Settings** from the Margin menu-bar icon:
+
+- **General** controls the screen edge, fan behavior, and animation speed.
+- **Notes** controls type, text size, and the default note color.
+- **Cloud Sync** selects and manages an optional Markdown folder.
+- **Shortcuts** changes the global shortcut and its action.
+- **System** controls Dock and display behavior, full-screen access, and note locking.
+- **Appearance** switches between light, system, and dark themes.
+- **Info → About** shows the public app version and contains **Automatic updates** and **Check Now**.
+
+Selected tabs, options, filters, and rows use a blue accent together with borders, checkmarks, or font weight so selection remains clear in dark mode and does not rely on color alone.
 
 ## Privacy
 

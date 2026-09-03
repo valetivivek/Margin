@@ -16,6 +16,15 @@ jobs:
         run: |
           version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
           test "$GITHUB_REF_NAME" = "v$version"
+      - name: Verify public update hosting
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+          if [[ "$visibility" != "public" ]]; then
+            echo "Margin releases must be public because installed apps cannot authenticate to the Sparkle feed."
+            exit 1
+          fi
       - name: Build DMG
         run: ./scripts/package-dmg.sh
       - name: Generate signed update feed
@@ -34,3 +43,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.sha256 dist/appcast.xml --generate-notes --title "Margin $GITHUB_REF_NAME"
+      - name: Verify published update feed
+        run: |
+          curl --fail --location --retry 5 --retry-all-errors --output /dev/null \
+            "https://github.com/valetivivek/Margin/releases/latest/download/appcast.xml"

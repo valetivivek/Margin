@@ -6,7 +6,9 @@ Update the short version and build number in `Info.plist`, update `CHANGELOG.md`
 ./scripts/package-dmg.sh
 ```
 
-The script builds and checks both architectures, verifies the app signature and DMG, and writes a SHA-256 checksum. Push a matching tag such as `v1.0.2`; the release workflow publishes the DMG, checksum, and signed update feed.
+The script builds and checks both architectures, verifies the app signature and DMG, and writes a SHA-256 checksum. Push a matching tag such as `v1.0.3`; the release workflow publishes the DMG, checksum, and signed update feed.
+
+The repository and its releases must be public before pushing the tag. Installed copies of Margin do not have GitHub credentials, so a feed or DMG hosted in a private release returns `404` and Sparkle cannot update. The release workflow checks this before publishing and verifies the public feed afterward.
 
 Before the first updater-enabled release, export the `com.valetivivek.margin` Sparkle key from Keychain and save it as the repository Actions secret `SPARKLE_PRIVATE_KEY`. The release workflow uses it to sign the update archive and appcast; never commit the private key.
 
