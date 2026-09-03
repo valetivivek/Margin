@@ -10,4 +10,4 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      - run: ./build.sh
+      - run: ./scripts/package-dmg.sh

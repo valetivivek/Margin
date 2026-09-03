@@ -16,4 +16,4 @@ Local note bodies are encrypted with AES-GCM before SQLite persistence. The key 
 
 Sparkle checks the signed GitHub Releases appcast and installs EdDSA-verified updates. Its automatic checks and downloads are controlled directly through Sparkle's user defaults from Settings.
 
-`./build.sh` compiles both supported architectures and runs persistence and interaction self-checks.
+`./scripts/package-dmg.sh` compiles both supported architectures, runs persistence and interaction self-checks, and packages the release disk image.

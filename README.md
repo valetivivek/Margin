@@ -74,14 +74,10 @@ Read the complete [privacy notes](PRIVACY.md).
 A full Xcode installation and internet access on the first build are required. The build downloads a pinned, checksum-verified copy of Sparkle for signed automatic updates.
 
 ```sh
-./build.sh
-```
-
-The build produces a universal app and runs the built-in checks. To package a local DMG:
-
-```sh
 ./scripts/package-dmg.sh
 ```
+
+The script builds a universal app, runs the built-in checks, and packages a local DMG.
 
 See [Architecture](docs/ARCHITECTURE.md), [Releasing](docs/RELEASING.md), and [Contributing](CONTRIBUTING.md).
 
