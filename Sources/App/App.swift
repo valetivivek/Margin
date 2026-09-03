@@ -4,6 +4,7 @@ import Combine
 import LocalAuthentication
 import QuartzCore
 import ServiceManagement
+import Sparkle
 import SwiftUI
 
 extension AppearanceMode {
@@ -344,6 +345,7 @@ final class AppCoordinator {
     let store: NotesStore
     let settings: AppSettings
     let cloudSync: CloudSyncController
+    let updater: SPUUpdater
     private var edges: [ObjectIdentifier: EdgePanelController] = [:]
     private var editors: [UUID: StickyWindowController] = [:]
     private var allNotes: NSWindowController?
@@ -351,8 +353,8 @@ final class AppCoordinator {
     private var settingsWindow: NSWindowController?
     private var onboarding: NSWindowController?
 
-    init(store: NotesStore, settings: AppSettings, cloudSync: CloudSyncController) {
-        self.store = store; self.settings = settings; self.cloudSync = cloudSync
+    init(store: NotesStore, settings: AppSettings, cloudSync: CloudSyncController, updater: SPUUpdater) {
+        self.store = store; self.settings = settings; self.cloudSync = cloudSync; self.updater = updater
         settings.onChange = { [weak self] in DispatchQueue.main.async {
             guard let self else { return }
             NSApp.appearance = self.settings.appearance.nsAppearance
@@ -374,7 +376,7 @@ final class AppCoordinator {
             return
         }
         if !UserDefaults.standard.bool(forKey: "onboardingCompleted") { showOnboarding() }
-        else { restorePinned() }
+        else { restoreEditors() }
     }
 
     func rebuildPanels() {
@@ -409,11 +411,16 @@ final class AppCoordinator {
     }
 
     func openEditor(_ id: UUID, on screen: NSScreen? = nil) {
-        guard let note = store.note(id), let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let note = store.note(id) else { return }
+        var savedPoint: NSPoint?
+        if note.pinned, let x = note.pinX, let y = note.pinY { savedPoint = NSPoint(x: x, y: y) }
+        else if let position = settings.lastNotePosition { savedPoint = NSPoint(x: position.x, y: position.y) }
+        guard let targetScreen = screen ?? savedPoint.flatMap({ point in NSScreen.screens.first { $0.visibleFrame.contains(point) } }) ?? NSScreen.main ?? NSScreen.screens.first else { return }
         edges[ObjectIdentifier(targetScreen)]?.collapseImmediately()
-        if let current = editors[id] { current.window?.makeKeyAndOrderFront(nil); return }
+        if let current = editors[id] { settings.lastOpenNoteID = id; current.window?.makeKeyAndOrderFront(nil); return }
         let show = { [weak self] in
             guard let self else { return }
+            settings.lastOpenNoteID = id
             let controller = StickyWindowController(note: note, screen: targetScreen, store: store, settings: settings, coordinator: self)
             editors[id] = controller
             NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: controller.window, queue: .main) { [weak self] _ in self?.editors[id] = nil }
@@ -451,7 +458,7 @@ final class AppCoordinator {
         if let settingsWindow { settingsWindow.window?.makeKeyAndOrderFront(nil); return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 530), styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Settings"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
-        window.contentView = NSHostingView(rootView: SettingsView(settings: settings, cloudSync: cloudSync))
+        window.contentView = NSHostingView(rootView: SettingsView(settings: settings, cloudSync: cloudSync, updater: updater))
         let controller = NSWindowController(window: window); settingsWindow = controller
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.settingsWindow = nil }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -474,8 +481,10 @@ final class AppCoordinator {
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func restorePinned() {
+    private func restoreEditors() {
+        let lastOpen = settings.lastOpenNoteID
         for note in store.active where note.pinned { openEditor(note.id) }
+        if let id = lastOpen, store.active.contains(where: { $0.id == id }) { openEditor(id) }
     }
 }
 
@@ -497,7 +506,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let settings = AppSettings()
     lazy var store = NotesStore(settings: settings)
     lazy var cloudSync = CloudSyncController(store: store, settings: settings)
-    lazy var coordinator = AppCoordinator(store: store, settings: settings, cloudSync: cloudSync)
+    private let updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    lazy var coordinator = AppCoordinator(store: store, settings: settings, cloudSync: cloudSync, updater: updaterController.updater)
     private var hotKeys: HotKeyManager?
     private var shortcutObservation: AnyCancellable?
     private var dockObservation: AnyCancellable?
@@ -575,6 +585,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Show Margin Deck", action: #selector(statusShowDeck(_:)), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Check for Updates…", action: #selector(statusCheckForUpdates(_:)), keyEquivalent: "")
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Margin", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.delegate = self
         item.menu = menu; statusItem = item
@@ -591,6 +603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func statusArchive(_ sender: Any?) { coordinator.showArchive() }
     @objc private func statusSettings(_ sender: Any?) { coordinator.showSettings() }
     @objc private func statusShowDeck(_ sender: Any?) { coordinator.showDeck() }
+    @objc private func statusCheckForUpdates(_ sender: Any?) { updaterController.checkForUpdates(sender) }
     @objc private func statusSideLeft(_ sender: Any?) { settings.side = .left }
     @objc private func statusSideRight(_ sender: Any?) { settings.side = .right }
     @objc private func statusSideBottom(_ sender: Any?) { settings.side = .bottom }
@@ -618,6 +631,11 @@ enum AppSelfCheck {
         guard AppCoordinator.targetScreens(from: [1, 2], main: 1, showOnAll: true) == [1, 2],
               AppCoordinator.targetScreens(from: [1, 2], main: 1, showOnAll: false) == [1] else {
             throw SelfCheckFailure("Display scope does not select all screens or only the main screen")
+        }
+        guard Bundle.main.object(forInfoDictionaryKey: "SUEnableAutomaticChecks") as? Bool == true,
+              Bundle.main.object(forInfoDictionaryKey: "SUAutomaticallyUpdate") as? Bool == true,
+              Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String != nil else {
+            throw SelfCheckFailure("Signed automatic updates are not configured")
         }
         guard ChecklistNSTextView.links(in: "Visit https://example.com now").first?.0.absoluteString == "https://example.com" else {
             throw SelfCheckFailure("URLs are not recognized in note text")

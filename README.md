@@ -38,6 +38,7 @@
 - **Focused editor** — autosave, checklists, clickable links, colors, and pinning.
 - **Full library** — search, archive, restore, import, and export your notes.
 - **Your displays, your choice** — show Margin on every display or only the main one.
+- **Automatic updates** — receive signed releases automatically, or opt out in Settings.
 - **Optional sync** — write readable Markdown files to a folder you control.
 - **Quiet when needed** — keep Margin in the menu bar without a Dock icon.
 - **Comfortable in any theme** — light by default, with system and dark appearances.
@@ -70,7 +71,7 @@ Read the complete [privacy notes](PRIVACY.md).
 
 ## Build from source
 
-A full Xcode installation is required. Margin has no third-party runtime dependencies.
+A full Xcode installation and internet access on the first build are required. The build downloads a pinned, checksum-verified copy of Sparkle for signed automatic updates.
 
 ```sh
 ./build.sh

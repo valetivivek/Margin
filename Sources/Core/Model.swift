@@ -108,6 +108,11 @@ final class AppSettings: ObservableObject {
         return (defaults.double(forKey: "lastNoteX"), defaults.double(forKey: "lastNoteY"))
     }
 
+    var lastOpenNoteID: UUID? {
+        get { defaults.string(forKey: "lastOpenNoteID").flatMap(UUID.init(uuidString:)) }
+        set { defaults.set(newValue?.uuidString, forKey: "lastOpenNoteID") }
+    }
+
     func rememberNotePosition(x: Double, y: Double) {
         defaults.set(x, forKey: "lastNoteX"); defaults.set(y, forKey: "lastNoteY")
     }
@@ -553,7 +558,16 @@ enum SelfCheck {
         let storeSettings = AppSettings()
         let savedDefault = storeSettings.defaultColor
         let savedUseDefault = storeSettings.useDefaultColor
-        defer { storeSettings.defaultColor = savedDefault; storeSettings.useDefaultColor = savedUseDefault }
+        let savedLastOpenNoteID = storeSettings.lastOpenNoteID
+        defer {
+            storeSettings.defaultColor = savedDefault; storeSettings.useDefaultColor = savedUseDefault
+            storeSettings.lastOpenNoteID = savedLastOpenNoteID
+        }
+        let rememberedNoteID = UUID()
+        storeSettings.lastOpenNoteID = rememberedNoteID
+        guard AppSettings().lastOpenNoteID == rememberedNoteID else {
+            throw SelfCheckFailure("The last-opened note is not remembered")
+        }
         storeSettings.useDefaultColor = true
         storeSettings.defaultColor = .lilac
         let store = NotesStore(settings: storeSettings, database: editDB)

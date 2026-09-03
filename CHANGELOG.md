@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2 - 2026-09-02
+
+- Reopen the last-used note at its saved screen position when Margin launches.
+- Added signed automatic updates, enabled by default with an opt-out in Settings.
+
 ## 1.0.1 - 2026-09-02
 
 - Fixed pointer clicks on expanded edge-deck notes by routing the full visible hover target through note activation.

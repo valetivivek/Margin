@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.1</string>
+    <string>1.0.2</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>3</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key>
@@ -30,6 +30,18 @@
     <true/>
     <key>NSFaceIDUsageDescription</key>
     <string>Unlock your private notes.</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/valetivivek/Margin/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>JV/NzxnwIACtvMS/8B3gfPC4bA3cwlOdaI0eg/l/06c=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
     <key>ATSApplicationFontsPath</key>
     <string>Fonts</string>
 </dict>

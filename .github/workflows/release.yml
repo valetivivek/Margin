@@ -18,7 +18,19 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version"
       - name: Build DMG
         run: ./scripts/package-dmg.sh
+      - name: Generate signed update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          test -n "$SPARKLE_PRIVATE_KEY"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | .build/sparkle-2.9.6/bin/generate_appcast \
+            --ed-key-file - \
+            --maximum-deltas 0 \
+            --download-url-prefix "https://github.com/valetivivek/Margin/releases/download/$GITHUB_REF_NAME/" \
+            --link "https://github.com/valetivivek/Margin" \
+            -o "$GITHUB_WORKSPACE/dist/appcast.xml" \
+            "$GITHUB_WORKSPACE/dist"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.sha256 --generate-notes --title "Margin $GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*.sha256 dist/appcast.xml --generate-notes --title "Margin $GITHUB_REF_NAME"

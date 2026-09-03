@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Sparkle
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1290,6 +1291,7 @@ private struct ShortcutRecorder: NSViewRepresentable {
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var cloudSync: CloudSyncController
+    let updater: SPUUpdater
     @State private var tab = SettingsTab.general
 
     var body: some View {
@@ -1415,6 +1417,17 @@ struct SettingsView: View {
                 settingRow("Show on all displays", "Turn off to keep the deck on the main display only") { Toggle("Show on all displays", isOn: $settings.showOnAllScreens).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(appAccent) }
+            }
+            settingsSection("Updates") {
+                settingRow("Automatic updates", "Check, download, and install new versions automatically") {
+                    Toggle("Automatic updates", isOn: Binding(
+                        get: { updater.automaticallyChecksForUpdates && updater.automaticallyDownloadsUpdates },
+                        set: { updater.automaticallyChecksForUpdates = $0; updater.automaticallyDownloadsUpdates = $0 }
+                    )).toggleStyle(.switch).labelsHidden().tint(appAccent)
+                }
+                settingRow("Check now", "Look for a new version manually", divider: false) {
+                    Button("Check Now") { updater.checkForUpdates() }.buttonStyle(MatteButtonStyle()).fixedSize()
+                }
             }
         }
     }
