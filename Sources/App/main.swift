@@ -1,6 +1,7 @@
 import AppKit
 
 if CommandLine.arguments.contains("--self-check") {
+    _ = NSApplication.shared
     var failures: [String] = []
     do { try SelfCheck.run() } catch { failures.append(error.localizedDescription) }
     do { try AppSelfCheck.run() } catch { failures.append(error.localizedDescription) }

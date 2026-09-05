@@ -85,9 +85,40 @@ extension NoteColor {
     }
 }
 
+extension GlobalShortcut {
+    var eventModifiers: NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if modifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        if modifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if modifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if modifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        return flags
+    }
+
+    var menuKey: String {
+        switch Int(keyCode) {
+        case kVK_Return: return "\r"
+        case kVK_Tab: return "\t"
+        case kVK_Space: return " "
+        case kVK_Delete: return "\u{8}"
+        case kVK_ForwardDelete: return String(UnicodeScalar(NSDeleteFunctionKey)!)
+        case kVK_LeftArrow: return String(UnicodeScalar(NSLeftArrowFunctionKey)!)
+        case kVK_RightArrow: return String(UnicodeScalar(NSRightArrowFunctionKey)!)
+        case kVK_UpArrow: return String(UnicodeScalar(NSUpArrowFunctionKey)!)
+        case kVK_DownArrow: return String(UnicodeScalar(NSDownArrowFunctionKey)!)
+        default:
+            if key.hasPrefix("F"), let number = Int(key.dropFirst()), (1...20).contains(number) {
+                return String(UnicodeScalar(NSF1FunctionKey + number - 1)!)
+            }
+            return key.lowercased()
+        }
+    }
+}
+
 extension AppSettings {
-    var noteFont: Font { fontName == "Helvetica" ? .system(size: textSize) : .custom(fontName, size: textSize) }
-    var listFont: Font { fontName == "Helvetica" ? .system(size: 13) : .custom(fontName, size: 13) }
+    var noteFont: Font { .custom(fontName, size: textSize) }
+    var listFont: Font { .custom(fontName, size: 13) }
+    var nsListFont: NSFont { NSFont(name: fontName, size: 13) ?? .systemFont(ofSize: 13) }
     var nsNoteFont: NSFont { NSFont(name: fontName, size: textSize) ?? .systemFont(ofSize: textSize) }
 }
 
@@ -172,41 +203,97 @@ private struct HoverButtonBody: View {
     }
 }
 
-private final class DragHandleNSView: NSView {
+final class DragHandleNSView: NSView {
+    var willDrag: (() -> Void)?
+    var dragging: ((NSPoint) -> Void)?
+    var didDrag: ((Bool) -> Void)?
+    private var hovered = false
+    private var hoverArea: NSTrackingArea?
+    private var dragStart: (frame: NSRect, pointer: NSPoint)?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area); hoverArea = area
+    }
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
     override func resetCursorRects() { super.resetCursorRects(); addCursorRect(bounds, cursor: .openHand) }
     override func mouseDown(with event: NSEvent) {
-        NSCursor.closedHand.push(); defer { NSCursor.pop() }
-        window?.performDrag(with: event)
+        guard let window else { return }
+        guard willDrag != nil else { window.performDrag(with: event); return }
+        dragStart = (window.frame, window.convertPoint(toScreen: event.locationInWindow))
+        NSCursor.closedHand.push()
+        willDrag?()
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let window, let dragStart else { return }
+        let pointer = window.convertPoint(toScreen: event.locationInWindow)
+        window.setFrameOrigin(NSPoint(x: dragStart.frame.minX + pointer.x - dragStart.pointer.x,
+                                      y: dragStart.frame.minY + pointer.y - dragStart.pointer.y))
+        dragging?(pointer)
+    }
+    override func mouseUp(with event: NSEvent) {
+        guard let dragStart else { return }
+        self.dragStart = nil
+        NSCursor.pop()
+        didDrag?(window?.frame != dragStart.frame)
     }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.withAlphaComponent(0.28).setFill()
+        if willDrag != nil {
+            if hovered {
+                NSColor.white.withAlphaComponent(0.16).setFill()
+                NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+            }
+            NSColor.white.withAlphaComponent(hovered ? 1 : 0.45).setFill()
+            let dotSize: CGFloat = hovered ? 3.5 : 2.5
+            for row in 0..<2 { for column in 0..<4 {
+                NSBezierPath(ovalIn: NSRect(x: bounds.midX - 9 + CGFloat(column) * 6 - dotSize / 2,
+                                           y: bounds.midY - 2.5 + CGFloat(row) * 5 - dotSize / 2, width: dotSize, height: dotSize)).fill()
+            } }
+            return
+        }
+        NSColor.black.withAlphaComponent(hovered ? 0.7 : 0.48).setFill()
         for row in 0..<3 { for column in 0..<2 {
-            NSBezierPath(ovalIn: NSRect(x: 5 + column * 4, y: 7 + row * 4, width: 2, height: 2)).fill()
+            NSBezierPath(ovalIn: NSRect(x: bounds.midX - 3 + CGFloat(column) * 4,
+                                       y: bounds.midY - 5 + CGFloat(row) * 4, width: 2, height: 2)).fill()
         } }
     }
 }
 
 private struct DragHandle: NSViewRepresentable {
-    func makeNSView(context: Context) -> DragHandleNSView { DragHandleNSView() }
-    func updateNSView(_ view: DragHandleNSView, context: Context) {}
+    var willDrag: (() -> Void)? = nil
+    var dragging: ((NSPoint) -> Void)? = nil
+    var didDrag: ((Bool) -> Void)? = nil
+    func makeNSView(context: Context) -> DragHandleNSView {
+        let view = DragHandleNSView()
+        view.setAccessibilityElement(true)
+        view.setAccessibilityLabel(willDrag == nil ? "Move note" : "Move deck")
+        updateNSView(view, context: context)
+        return view
+    }
+    func updateNSView(_ view: DragHandleNSView, context: Context) { view.willDrag = willDrag; view.dragging = dragging; view.didDrag = didDrag }
 }
 
 private struct ChecklistPreviewLine: View {
     let line: String
-    var checkboxSize: CGFloat = 15
+    let font: NSFont
+    private var checkboxSize: CGFloat { ChecklistMarkGeometry.boxSize(font: font) }
 
     var body: some View {
         if let item = ChecklistLine.parse(line) {
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 RoundedRectangle(cornerRadius: checkboxSize / 4)
                     .fill(item.checked ? Color.black.opacity(0.48) : .clear)
                     .overlay(RoundedRectangle(cornerRadius: checkboxSize / 4).stroke(.black.opacity(0.36), lineWidth: 1.2))
                     .overlay { if item.checked { Image(systemName: "checkmark").font(.system(size: checkboxSize * 0.6, weight: .bold)).foregroundStyle(.white) } }
-                    .frame(width: checkboxSize, height: checkboxSize).padding(.top, 1)
-                Text(item.text).foregroundStyle(.black.opacity(item.checked ? 0.44 : 0.72)).strikethrough(item.checked)
-            }
+                    .frame(width: checkboxSize, height: checkboxSize)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + ChecklistMarkGeometry.baselineOffset(font: font) }
+                Text(item.text.isEmpty ? " " : item.text).foregroundStyle(.black.opacity(item.checked ? 0.44 : 0.72)).strikethrough(item.checked)
+            }.font(Font(font))
         } else {
-            Text(line.isEmpty ? " " : line)
+            Text(line.isEmpty ? " " : line).font(Font(font))
         }
     }
 }
@@ -217,6 +304,10 @@ struct EdgeDeckView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var model: EdgePanelModel
     let expand: (Bool) -> Void
+    let hover: (Bool) -> Void
+    let beginDrag: () -> Void
+    let draggingDeck: (NSPoint) -> Void
+    let endDrag: (Bool) -> Void
     let create: () -> Void
     let open: (UUID) -> Void
     let showAll: () -> Void
@@ -252,7 +343,7 @@ struct EdgeDeckView: View {
     private var bottomPill: some View {
         Button { expand(true) } label: {
             HStack(spacing: 6) {
-                ForEach(Array(store.active.prefix(8))) { note in
+                ForEach(Array(store.active.prefix(model.noteLimit))) { note in
                     Capsule().fill(note.color.color).frame(width: 16, height: 6)
                 }
             }
@@ -261,26 +352,26 @@ struct EdgeDeckView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { if $0 { expand(true) } }
+        .onHover(perform: hover)
         .contextMenu { deckMenu }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .accessibilityLabel("Show Margin deck")
     }
 
     private var bottomFan: some View {
-        HStack(alignment: .bottom, spacing: 7) {
-            ForEach(Array(store.active.prefix(8).enumerated()), id: \.element.id) { index, note in
+        HStack(alignment: .bottom, spacing: 0) {
+            ForEach(Array(store.active.prefix(model.noteLimit).enumerated()), id: \.element.id) { index, note in
                 bottomSlot(note, index: index)
-                    .onDrag { dragging = note.id; return NSItemProvider(object: note.id.uuidString as NSString) }
-                    .onDrop(of: [.text], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
+                    .onDrag { noteDragProvider(note) }
+                    .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
             }
-            deckAddButton.padding(.bottom, 2)
         }
-        .padding(.horizontal, 16).padding(.bottom, 10)
+        .overlay(alignment: .bottomTrailing) { deckControls.offset(x: 72) }
+        .padding(.horizontal, 80).padding(.bottom, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .contentShape(Rectangle())
         .onHover { inside in
-            if inside { expand(true) } else { hovered = nil; expand(false) }
+            if !inside { hovered = nil }; hover(inside)
         }
         .onAppear { hovered = nil; hoverReadyAt = ProcessInfo.processInfo.systemUptime + settings.fanDuration }
         .onDisappear { hovered = nil }
@@ -295,7 +386,7 @@ struct EdgeDeckView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                         ForEach(Array(current.body.components(separatedBy: "\n").prefix(4).enumerated()), id: \.offset) { _, line in
-                            ChecklistPreviewLine(line: line, checkboxSize: 11).lineLimit(1)
+                            ChecklistPreviewLine(line: line, font: settings.nsNoteFont).lineLimit(1)
                         }
                         Spacer(minLength: 0)
                     }
@@ -314,6 +405,7 @@ struct EdgeDeckView: View {
             }
         }
         .buttonStyle(.plain)
+        .offset(y: lifted ? -8 : 0)
         .frame(width: DeckCardMetrics.bottomStep, height: 210, alignment: .bottom)
         .overlay(alignment: .bottom) {
             Color.clear
@@ -331,6 +423,7 @@ struct EdgeDeckView: View {
         .contextMenu { noteMenu(current) }
         .zIndex(lifted ? 20 : Double(index))
         .animation(reduceMotion ? nil : .easeOut(duration: settings.cardDuration), value: lifted)
+        .help(current.title)
         .accessibilityLabel("\(current.title), \(current.color.name)")
     }
 
@@ -345,7 +438,7 @@ struct EdgeDeckView: View {
             } else {
                 Button { expand(true) } label: {
                     VStack(spacing: 6) {
-                        ForEach(Array(store.active.prefix(8))) { note in
+                        ForEach(Array(store.active.prefix(model.noteLimit))) { note in
                             Capsule().fill(note.color.color).frame(width: 6, height: 16)
                         }
                     }
@@ -355,7 +448,7 @@ struct EdgeDeckView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .onHover { inside in if inside { expand(true) } }
+                .onHover(perform: hover)
                 .contextMenu { deckMenu }
                 .accessibilityLabel("Show Margin deck")
             }
@@ -364,39 +457,49 @@ struct EdgeDeckView: View {
     }
 
     private var fan: some View {
-        let notes = Array(store.active.prefix(8))
+        let notes = Array(store.active.prefix(model.noteLimit))
         let hoveredIndex = notes.firstIndex { $0.id == hovered }
-        return VStack(alignment: settings.side == .right ? .trailing : .leading, spacing: DeckCardMetrics.spacing) {
-            ForEach(Array(notes.enumerated()), id: \.element.id) { index, note in
-                deckCard(note, index: index)
-                    .onDrag { dragging = note.id; return NSItemProvider(object: note.id.uuidString as NSString) }
-                    .onDrop(of: [.text], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
-                    .offset(y: DeckCardMetrics.spreadOffset(index: index, hoveredIndex: hoveredIndex))
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
+        let edge: Alignment = settings.side == .right ? .trailing : .leading
+        return ZStack(alignment: edge) {
+            VStack(spacing: DeckCardMetrics.spacing) {
+                ForEach(Array(notes.enumerated()), id: \.element.id) { index, note in
+                    deckCard(note, index: index)
+                        .onDrag { noteDragProvider(note) }
+                        .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
+                        .offset(y: DeckCardMetrics.spreadOffset(index: index, hoveredIndex: hoveredIndex))
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
+                }
             }
-            if store.active.count > 8 {
-                Button("+\(store.active.count - 8) more") { showAll() }
-                    .buttonStyle(.borderless).padding(8).background(.regularMaterial, in: Capsule()).padding(.top, 90)
-            } else {
-                deckAddButton
-                    .padding(.top, 88)
-                    .opacity(model.fanVisible ? 1 : 0)
-                    .animation(reduceMotion ? nil : .timingCurve(0.20, 1.08, 0.30, 1.00, duration: settings.fanDuration).delay(Double(min(store.active.count, 8)) * 0.03 * settings.animationScale), value: model.fanVisible)
-            }
+            .frame(height: DeckCardMetrics.stackHeight(count: notes.count))
+            deckControls
+                .offset(y: notes.isEmpty ? 0 : DeckCardMetrics.stackHeight(count: notes.count) / 2 + 28)
+                .opacity(model.fanVisible ? 1 : 0)
         }
-        .padding(.vertical, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: settings.side == .right ? .trailing : .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge)
         .contentShape(Rectangle())
         .onHover { inside in
-            if inside {
-                expand(true)
-            } else {
-                hovered = nil
-                expand(false)
-            }
+            if !inside { hovered = nil }
+            hover(inside)
         }
         .onAppear { hovered = nil; hoverReadyAt = ProcessInfo.processInfo.systemUptime + settings.fanDuration }
         .onDisappear { hovered = nil }
+    }
+
+    private var deckControls: some View {
+        VStack(spacing: 2) {
+            deckAddButton
+            DragHandle(willDrag: beginDrag, dragging: draggingDeck, didDrag: endDrag)
+                .frame(width: 36, height: 22)
+                .help("Drag to the left, right or bottom edge. Release elsewhere to return to the previous position.")
+        }
+        .overlay(alignment: .top) {
+            if store.active.count > model.noteLimit {
+                Button("+\(store.active.count - model.noteLimit) more") { showAll() }
+                    .buttonStyle(.borderless).fixedSize()
+                    .offset(x: settings.side == .bottom ? 0 : (settings.side == .left ? 60 : -60), y: settings.side == .bottom ? -24 : 0)
+                    .help("Show all notes")
+            }
+        }
     }
 
     private var deckAddButton: some View {
@@ -423,13 +526,13 @@ struct EdgeDeckView: View {
         let lifted = hovered == note.id
         let activeOffset = lifted ? DeckCardMetrics.liftedOffset : DeckCardMetrics.tuckedOffset(index: index)
         let offset = reduceMotion || model.fanVisible ? activeOffset : DeckCardMetrics.hiddenOffset
-        let isLast = index == min(store.active.count, 8) - 1
+        let isLast = index == min(store.active.count, model.noteLimit) - 1
         let edge: Alignment = settings.side == .right ? .trailing : .leading
         return Button { activate(note, lifted: lifted) } label: {
             ZStack(alignment: edge) {
                 HStack(spacing: 0) {
                 if settings.side == .right { tabLabel(current.title) }
-                VStack(alignment: settings.side == .right ? .leading : .trailing, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         if settings.side == .right {
                             Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
@@ -441,10 +544,10 @@ struct EdgeDeckView: View {
                             Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                         }
                     }
-                    VStack(alignment: settings.side == .right ? .leading : .trailing, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 3) {
                         ForEach(Array(current.body.components(separatedBy: "\n").prefix(3).enumerated()), id: \.offset) { _, line in
-                            ChecklistPreviewLine(line: line, checkboxSize: 11).lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: settings.side == .right ? .leading : .trailing)
+                            ChecklistPreviewLine(line: line, font: settings.nsNoteFont).lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                     .font(settings.noteFont).foregroundStyle(.black.opacity(0.72))
@@ -485,12 +588,24 @@ struct EdgeDeckView: View {
         }
         .zIndex(Double(index))
         .contextMenu { noteMenu(current) }
+        .help(current.title)
         .accessibilityLabel("\(current.title), \(current.color.name), edited \(current.updatedAt.formatted(date: .omitted, time: .shortened))")
     }
 
     private func activate(_ note: Note, lifted: Bool) {
         if DeckHoverGate.opensOnTap(mode: settings.fanMode, alreadyPreviewed: lifted) { open(note.id) }
         else { hovered = note.id }
+    }
+
+    private func noteDragProvider(_ note: Note) -> NSItemProvider {
+        do {
+            let provider = try NoteFile(note: store.note(note.id) ?? note).itemProvider()
+            dragging = note.id
+            return provider
+        } catch {
+            store.errorMessage = error.localizedDescription
+            return NSItemProvider()
+        }
     }
 
     private func tabLabel(_ title: String) -> some View {
@@ -583,6 +698,8 @@ enum DeckCardMetrics {
     static let hoverSpread: CGFloat = 24
     static let bottomStep: CGFloat = 104
 
+    static func stackHeight(count: Int) -> CGFloat { count == 0 ? 0 : height + CGFloat(count - 1) * step }
+
     static func tuckedOffset(index: Int) -> CGFloat { width - tabWidth - CGFloat(index * 4) }
     static func hoverWidth(lifted: Bool, index: Int) -> CGFloat { lifted ? visibleWidth : tabWidth + CGFloat(index * 4) }
     static func hoverHeight(lifted: Bool, isLast: Bool) -> CGFloat { lifted || isLast ? height : step }
@@ -602,6 +719,8 @@ final class ChecklistNSTextView: NSTextView {
     var changed: ((String) -> Void)?
     var cancelled: (() -> Void)?
     var noteFont: NSFont = .systemFont(ofSize: 21)
+    var markdownEnabled = true
+    private var codeRanges: [NSRange] = []
 
     override func didChangeText() {
         super.didChangeText(); applyStyle(); changed?(string); needsDisplay = true
@@ -635,8 +754,8 @@ final class ChecklistNSTextView: NSTextView {
         } ?? []
     }
 
-    static func opensLink(with modifiers: NSEvent.ModifierFlags) -> Bool {
-        modifiers.intersection([.command, .option, .control, .shift]).isEmpty
+    static func opensLink(with modifiers: NSEvent.ModifierFlags, keyHeld: Bool = false) -> Bool {
+        !keyHeld && modifiers.intersection([.command, .option, .control, .shift, .function]).isEmpty
     }
 
     private var normalTypingAttributes: [NSAttributedString.Key: Any] {
@@ -652,12 +771,15 @@ final class ChecklistNSTextView: NSTextView {
         ]
         storage.beginEditing()
         storage.setAttributes(normalTypingAttributes, range: NSRange(location: 0, length: storage.length))
+        codeRanges = markdownEnabled ? NoteMarkdown.apply(to: storage, font: noteFont) : []
         (string as NSString).enumerateSubstrings(in: NSRange(location: 0, length: (string as NSString).length), options: [.byLines, .substringNotRequired]) { _, range, _, _ in
+            guard !self.codeRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }) else { return }
             if range.length >= 6 {
                 let prefix = (self.string as NSString).substring(with: NSRange(location: range.location, length: 6)).lowercased()
                 if prefix == "- [ ] " || prefix == "- [x] " {
                     let marker = NSRange(location: range.location, length: 6)
-                    let paragraph = NSMutableParagraphStyle(); paragraph.firstLineHeadIndent = 18; paragraph.headIndent = 18
+                    let paragraph = NSMutableParagraphStyle()
+                    paragraph.firstLineHeadIndent = self.checklistIndent; paragraph.headIndent = self.checklistIndent
                     paragraph.minimumLineHeight = self.layoutManager?.defaultLineHeight(for: self.noteFont)
                         ?? ceil(self.noteFont.ascender - self.noteFont.descender + self.noteFont.leading)
                     storage.addAttributes([.foregroundColor: NSColor.clear, .font: NSFont.systemFont(ofSize: 0.01)], range: marker)
@@ -681,7 +803,9 @@ final class ChecklistNSTextView: NSTextView {
                 }
             }
         }
-        for (url, range) in Self.links(in: string) {
+        for (url, range) in Self.links(in: string) where
+            (storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont)?.pointSize ?? 0 > 1
+            && !codeRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }) {
             storage.addAttributes([.link: url, .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
         }
         storage.endEditing(); selectedRanges = selection
@@ -692,10 +816,11 @@ final class ChecklistNSTextView: NSTextView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard window != nil else { return }
+        applyStyle()
+        if let textContainer { layoutManager?.ensureLayout(for: textContainer) }
+        needsDisplay = true
         DispatchQueue.main.async { [weak self] in
             guard let self, let window else { return }
-            self.applyStyle()
-            self.needsDisplay = true
             window.makeFirstResponder(self)
         }
     }
@@ -731,21 +856,29 @@ final class ChecklistNSTextView: NSTextView {
         }
     }
 
+    var checklistIndent: CGFloat { ChecklistMarkGeometry.boxSize(font: noteFont) + 8 }
+
+    func checkboxRect(at character: Int) -> NSRect? {
+        guard !codeRanges.contains(where: { NSLocationInRange(character, $0) }) else { return nil }
+        guard let layoutManager, let textContainer, character < (string as NSString).length else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        let glyph = layoutManager.glyphIndexForCharacter(at: character)
+        let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        let baseline = lineRect.minY + layoutManager.location(forGlyphAt: glyph).y
+        let size = ChecklistMarkGeometry.boxSize(font: noteFont)
+        return NSRect(x: textContainerOrigin.x + textContainer.lineFragmentPadding,
+                      y: textContainerOrigin.y + baseline - ChecklistMarkGeometry.baselineOffset(font: noteFont) - size / 2, width: size, height: size)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        guard let layoutManager, let textContainer else { super.draw(dirtyRect); return }
         super.draw(dirtyRect)
         let ns = string as NSString
         ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length), options: [.byLines, .substringNotRequired]) { _, range, _, _ in
             guard range.length >= 6 else { return }
             let prefix = ns.substring(with: NSRange(location: range.location, length: 6)).lowercased()
             guard prefix == "- [ ] " || prefix == "- [x] " else { return }
-            let glyph = layoutManager.glyphIndexForCharacter(at: range.location)
-            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-            var rect = lineRect
-            rect.origin.x = self.textContainerInset.width + 1
-            rect.origin.y += self.textContainerInset.height + 6
-            rect.size = NSSize(width: 16, height: 16)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 5.5, yRadius: 5.5)
+            guard let rect = self.checkboxRect(at: range.location) else { return }
+            let path = NSBezierPath(roundedRect: rect, xRadius: rect.width / 4, yRadius: rect.height / 4)
             NSColor.black.withAlphaComponent(0.42).setStroke(); path.lineWidth = 1.5; path.stroke()
             if prefix == "- [x] " {
                 NSColor.black.withAlphaComponent(0.52).setFill(); path.fill()
@@ -753,22 +886,20 @@ final class ChecklistNSTextView: NSTextView {
                 let mark = NSBezierPath(); mark.move(to: points.start); mark.line(to: points.middle); mark.line(to: points.end)
                 NSColor.white.setStroke(); mark.lineWidth = 1.8; mark.stroke()
             }
-            _ = textContainer
         }
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let layoutManager, let textContainer, !string.isEmpty {
-            var local = point; local.x -= textContainerInset.width; local.y -= textContainerInset.height
+            var local = point; local.x -= textContainerOrigin.x; local.y -= textContainerOrigin.y
             let glyph = min(layoutManager.glyphIndex(for: local, in: textContainer), max(0, layoutManager.numberOfGlyphs - 1))
             let character = layoutManager.characterIndexForGlyph(at: glyph)
             let line = (string as NSString).lineRange(for: NSRange(location: min(character, (string as NSString).length - 1), length: 0))
             if line.length >= 6 {
                 let prefix = (string as NSString).substring(with: NSRange(location: line.location, length: 6)).lowercased()
-                let lineGlyph = layoutManager.glyphIndexForCharacter(at: line.location)
-                let rect = layoutManager.lineFragmentRect(forGlyphAt: lineGlyph, effectiveRange: nil).offsetBy(dx: textContainerInset.width, dy: textContainerInset.height)
-                if (prefix == "- [ ] " || prefix == "- [x] "), point.x <= rect.minX + 22 {
+                if (prefix == "- [ ] " || prefix == "- [x] "),
+                   let checkbox = checkboxRect(at: line.location), checkbox.insetBy(dx: -3, dy: -3).contains(point) {
                     let lineText = (string as NSString).substring(with: line)
                     let contentRange = NSRange(location: line.location, length: line.length - (lineText.hasSuffix("\n") ? 1 : 0))
                     if let replacement = ChecklistLine.toggled((string as NSString).substring(with: contentRange)) {
@@ -777,9 +908,14 @@ final class ChecklistNSTextView: NSTextView {
                 }
             }
             let glyphRect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer).insetBy(dx: -2, dy: -2)
-            if glyphRect.contains(local), Self.opensLink(with: event.modifierFlags),
-               let url = textStorage?.attribute(.link, at: character, effectiveRange: nil) as? URL {
-                NSWorkspace.shared.open(url); return
+            if glyphRect.contains(local), let url = textStorage?.attribute(.link, at: character, effectiveRange: nil) as? URL {
+                let keyHeld = (0..<128).contains { CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0)) }
+                if Self.opensLink(with: event.modifierFlags, keyHeld: keyHeld) { NSWorkspace.shared.open(url) }
+                else {
+                    window?.makeFirstResponder(self)
+                    setSelectedRange(NSRange(location: characterIndexForInsertion(at: point), length: 0))
+                }
+                return
             }
         }
         super.mouseDown(with: event)
@@ -793,11 +929,14 @@ final class ChecklistNSTextView: NSTextView {
 }
 
 struct ChecklistMarkGeometry {
+    static func baselineOffset(font: NSFont) -> CGFloat { (font.ascender + font.descender) / 2 }
+    static func boxSize(font: NSFont) -> CGFloat { max(10, min(18, (font.pointSize * 0.75).rounded())) }
+
     static func points(in rect: NSRect) -> (start: NSPoint, middle: NSPoint, end: NSPoint) {
         (
-            NSPoint(x: rect.minX + 3.5, y: rect.midY),
-            NSPoint(x: rect.midX - 0.5, y: rect.maxY - 4),
-            NSPoint(x: rect.maxX - 3, y: rect.minY + 4)
+            NSPoint(x: rect.minX + rect.width * 0.22, y: rect.midY),
+            NSPoint(x: rect.minX + rect.width * 0.47, y: rect.minY + rect.height * 0.75),
+            NSPoint(x: rect.minX + rect.width * 0.81, y: rect.minY + rect.height * 0.25)
         )
     }
 }
@@ -810,6 +949,7 @@ final class ChecklistEditorHandle: ObservableObject {
 struct ChecklistTextEditor: NSViewRepresentable {
     @Binding var text: String
     let font: NSFont
+    var markdownEnabled = true
     let cancel: () -> Void
     let handle: ChecklistEditorHandle
 
@@ -817,7 +957,7 @@ struct ChecklistTextEditor: NSViewRepresentable {
         let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         let view = ChecklistNSTextView(); view.drawsBackground = false; view.isRichText = false; view.allowsUndo = true; view.usesFindPanel = true; view.isIncrementalSearchingEnabled = true; view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
         view.focusRingType = .none; view.textContainerInset = NSSize(width: 0, height: 8); view.textContainer?.widthTracksTextView = true; view.isVerticallyResizable = true; view.autoresizingMask = [.width]
-        view.noteFont = font; view.string = text; view.applyStyle(); view.cancelled = cancel; view.changed = { value in if value != text { text = value } }
+        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.string = text; view.applyStyle(); view.cancelled = cancel; view.changed = { value in if value != text { text = value } }
         handle.view = view
         scroll.documentView = view
         view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
@@ -829,9 +969,10 @@ struct ChecklistTextEditor: NSViewRepresentable {
         handle.view = view
         let fontChanged = view.noteFont.fontName != font.fontName || view.noteFont.pointSize != font.pointSize
         let textChanged = view.string != text
-        view.noteFont = font; view.cancelled = cancel
+        let markdownChanged = view.markdownEnabled != markdownEnabled
+        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.cancelled = cancel
         if textChanged { view.string = text }
-        if textChanged || fontChanged { view.applyStyle(); view.needsDisplay = true }
+        if textChanged || fontChanged || markdownChanged { view.applyStyle(); view.needsDisplay = true }
     }
 }
 
@@ -860,30 +1001,37 @@ struct NoteEditorView: View {
                     HStack(spacing: 7) {
                         ZStack {
                             Circle().fill(closeHovered ? Color(nsColor: .systemRed) : .black.opacity(0.30))
-                        }.frame(width: 9, height: 9)
-                        Circle().fill(.black.opacity(0.12)).frame(width: 9, height: 9)
-                    }.frame(width: 29, height: 30).contentShape(Rectangle())
+                        }.frame(width: 12, height: 12)
+                        Circle().fill(.black.opacity(0.12)).frame(width: 12, height: 12)
+                    }.frame(width: 34, height: 30).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).onHover { closeHovered = $0 }.animation(.easeOut(duration: 0.10), value: closeHovered)
                 .accessibilityLabel("Close note").help("Close this note and return to the deck")
                 TextField("Untitled note", text: $note.title).textFieldStyle(.plain).font(.system(size: 16, weight: .semibold))
                 Spacer()
                 Text("Saved · \(shortAge(note.updatedAt))").font(.system(size: 11)).foregroundStyle(.black.opacity(0.42))
-                DragHandle().frame(width: 18, height: 24).help("Drag to move; drag an edge or corner to resize")
+                if settings.shareNotes {
+                    ShareLink(item: NoteFile(note: note), preview: SharePreview(note.title)) {
+                        Image(systemName: "square.and.arrow.up").resizable().scaledToFit()
+                            .frame(width: 14, height: 14).frame(width: 24, height: 24)
+                    }.buttonStyle(HoverButtonStyle()).foregroundStyle(.black.opacity(0.48)).tint(.black.opacity(0.48)).help("Share as Markdown").accessibilityLabel("Share as Markdown")
+                }
+                DragHandle().frame(width: 24, height: 24).help("Drag to move; drag an edge or corner to resize")
                 Button { note.pinned.toggle(); save(immediate: true); pin(note.pinned) } label: {
-                    Image(systemName: note.pinned ? "pin.fill" : "pin").frame(width: 24, height: 24)
+                    Image(systemName: note.pinned ? "pin.fill" : "pin").resizable().scaledToFit()
+                        .frame(width: 14, height: 14).frame(width: 24, height: 24)
                         .background(note.pinned ? .black.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 6))
                 }.buttonStyle(HoverButtonStyle()).foregroundStyle(.black.opacity(0.48)).help(note.pinned ? "Unpin from desktop" : "Pin note to desktop")
             }
             .padding(.horizontal, 16).frame(height: 47)
             Divider().opacity(0.22).padding(.horizontal, 16)
-            ChecklistTextEditor(text: $note.body, font: settings.nsNoteFont, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
+            ChecklistTextEditor(text: $note.body, font: settings.nsNoteFont, markdownEnabled: settings.markdownEnabled, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
             Divider().opacity(0.2)
             HStack(spacing: 8) {
                 ForEach(NoteColor.allCases, id: \.rawValue) { value in
                     Button { note.color = value; save(immediate: true) } label: {
                         RoundedRectangle(cornerRadius: 6).fill(value.color).frame(width: 20, height: 20)
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(colorScheme == .dark ? .white.opacity(note.color == value ? 0.72 : 0) : .black.opacity(note.color == value ? 0.48 : 0), lineWidth: 2.5).padding(-5))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(colorScheme == .dark ? .white.opacity(note.color == value ? 0.72 : 0) : .black.opacity(note.color == value ? 0.48 : 0), lineWidth: 2).padding(-2))
                     }.buttonStyle(HoverButtonStyle()).help("\(value.name) color")
                 }
                 Button(action: checklistEditor.insertItem) {
@@ -1023,7 +1171,7 @@ struct AllNotesView: View {
             Capsule().fill(note.color.color).frame(width: 4, height: 36)
             VStack(alignment: .leading, spacing: 4) {
                 HStack { Text(note.title).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(note.archivedAt == nil ? "ACTIVE" : "ARCHIVED").font(.system(size: 9, weight: .medium)).padding(.horizontal, 6).padding(.vertical, 3).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5)); Text(shortAge(note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
-                ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", checkboxSize: 10)
+                ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
             }
         }
@@ -1112,7 +1260,7 @@ struct NotePreview: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(Array(note.body.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        ChecklistPreviewLine(line: line)
+                        ChecklistPreviewLine(line: line, font: settings.nsNoteFont)
                     }
                 }
                 .font(settings.noteFont).foregroundStyle(.black.opacity(0.72)).frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1209,7 +1357,7 @@ struct ArchiveView: View {
             Capsule().fill(note.color.color).frame(width: 4, height: 36)
             VStack(alignment: .leading, spacing: 4) {
                 HStack { Text(note.title).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(shortAge(note.archivedAt ?? note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
-                ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", checkboxSize: 10)
+                ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
             }
         }.padding(.vertical, 7).padding(.horizontal, 7).contentShape(Rectangle())
@@ -1265,12 +1413,20 @@ enum ExportController {
     }
 }
 
-private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", cloud = "Cloud Sync", shortcuts = "Shortcuts", system = "System", appearance = "Appearance", about = "About" }
+private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", cloud = "Cloud Sync", shortcuts = "Keyboard", system = "System", appearance = "Appearance", about = "About" }
+
+extension Notification.Name {
+    static let marginShortcutRecording = Notification.Name("MarginShortcutRecording")
+}
 
 private final class ShortcutRecorderButton: NSButton {
     var shortcut = GlobalShortcut.standard { didSet { if !recording { title = shortcut.display } } }
-    var changed: ((GlobalShortcut) -> Void)?
-    private var recording = false
+    var changed: ((GlobalShortcut) -> Bool)?
+    private var recording = false {
+        didSet {
+            if recording != oldValue { NotificationCenter.default.post(name: .marginShortcutRecording, object: recording) }
+        }
+    }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -1281,9 +1437,14 @@ private final class ShortcutRecorderButton: NSButton {
     }
 
     @objc private func beginRecording() {
-        recording = true; title = "Press shortcut…"; window?.makeFirstResponder(self)
+        window?.makeFirstResponder(self)
+        recording = true; title = "Press shortcut…"
     }
 
+    override func resignFirstResponder() -> Bool {
+        cancelOperation(nil)
+        return super.resignFirstResponder()
+    }
     override func cancelOperation(_ sender: Any?) { recording = false; title = shortcut.display }
     override func keyDown(with event: NSEvent) { if recording { record(event) } else { super.keyDown(with: event) } }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -1300,10 +1461,11 @@ private final class ShortcutRecorderButton: NSButton {
         if flags.contains(.shift) { modifiers |= UInt32(shiftKey) }
         if flags.contains(.command) { modifiers |= UInt32(cmdKey) }
         guard modifiers & UInt32(controlKey | optionKey | cmdKey) != 0,
-              !(event.keyCode == UInt16(kVK_ANSI_L) && modifiers == UInt32(cmdKey | optionKey)),
               let key = Self.keyName(event) else { NSSound.beep(); return }
-        shortcut = GlobalShortcut(keyCode: UInt32(event.keyCode), modifiers: modifiers, key: key)
-        recording = false; title = shortcut.display; changed?(shortcut)
+        let candidate = GlobalShortcut(keyCode: UInt32(event.keyCode), modifiers: modifiers, key: key)
+        guard changed?(candidate) != false else { NSSound.beep(); return }
+        shortcut = candidate
+        recording = false; title = shortcut.display
     }
 
     private static func keyName(_ event: NSEvent) -> String? {
@@ -1328,21 +1490,15 @@ private final class ShortcutRecorderButton: NSButton {
 }
 
 private struct ShortcutRecorder: NSViewRepresentable {
-    @Binding var shortcut: GlobalShortcut
+    let shortcut: GlobalShortcut
+    let changed: (GlobalShortcut) -> Bool
 
     func makeNSView(context: Context) -> ShortcutRecorderButton {
-        let view = ShortcutRecorderButton(); view.shortcut = shortcut
-        view.changed = { context.coordinator.shortcut.wrappedValue = $0 }
+        let view = ShortcutRecorderButton()
+        updateNSView(view, context: context)
         return view
     }
-
-    func updateNSView(_ view: ShortcutRecorderButton, context: Context) { view.shortcut = shortcut }
-    func makeCoordinator() -> Coordinator { Coordinator(shortcut: $shortcut) }
-
-    final class Coordinator {
-        var shortcut: Binding<GlobalShortcut>
-        init(shortcut: Binding<GlobalShortcut>) { self.shortcut = shortcut }
-    }
+    func updateNSView(_ view: ShortcutRecorderButton, context: Context) { view.shortcut = shortcut; view.changed = changed }
 }
 
 private struct AccentSegmentedPicker<Value: Hashable>: NSViewRepresentable {
@@ -1395,6 +1551,7 @@ struct SettingsView: View {
     @ObservedObject var cloudSync: CloudSyncController
     let updater: SPUUpdater
     @State private var tab = SettingsTab.general
+    @State private var screens = NSScreen.screens
 
     static func visibleVersion(shortVersion: String) -> String { shortVersion }
 
@@ -1404,7 +1561,7 @@ struct SettingsView: View {
                 sidebarHeading("Settings")
                 tabButton(.general, "slider.horizontal.3")
                 tabButton(.notes, "note.text")
-                tabButton(.cloud, "icloud")
+                tabButton(.cloud, "icloud").disabled(true).opacity(0.4).help("Cloud Sync is coming later")
                 tabButton(.shortcuts, "command")
                 tabButton(.system, "laptopcomputer")
                 tabButton(.appearance, "paintpalette")
@@ -1420,6 +1577,7 @@ struct SettingsView: View {
                 .background(Color(nsColor: .textBackgroundColor))
         }
         .tint(appAccent)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in screens = NSScreen.screens }
     }
 
     private func sidebarHeading(_ title: String) -> some View { Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.9).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.bottom, 5) }
@@ -1431,7 +1589,6 @@ struct SettingsView: View {
                 Image(systemName: icon).font(.system(size: 13, weight: .medium)).frame(width: 18)
                 Text(value.rawValue).font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                 Spacer(minLength: 0)
-                if isSelected { Image(systemName: "checkmark.circle.fill").font(.system(size: 12, weight: .semibold)) }
             }
                 .foregroundStyle(isSelected ? appAccent : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1450,6 +1607,22 @@ struct SettingsView: View {
                 settingRow("Screen side", "Which edge the deck lives on") { AccentSegmentedPicker(selection: $settings.side, options: [(.left, "Left"), (.right, "Right"), (.bottom, "Bottom")], accessibilityLabel: "Screen side").frame(width: 190, height: 28) }
                 settingRow("Fan notes", "Hovering always fans the deck; this is what opens a card") { AccentSegmentedPicker(selection: $settings.fanMode, options: [(.hover, "On hover"), (.click, "On click")], accessibilityLabel: "Fan notes").frame(width: 160, height: 28) }
                 settingRow("Keep the deck open", "The deck stays at the edge instead of resting as the dots") { Toggle("Keep the deck open", isOn: $settings.keepOpen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
+                settingRow("Activation delay", "Wait before opening the deck on hover") {
+                    HStack(spacing: 8) {
+                        Slider(value: $settings.activationDelay, in: 0...1).frame(width: 130).accessibilityLabel("Activation delay")
+                        Text("\(Int((settings.activationDelay * 1000).rounded())) ms").monospacedDigit().frame(width: 55, alignment: .trailing)
+                    }
+                }
+                settingRow("Display", "Choose a display, or show the deck on all of them") {
+                    Picker("Display", selection: $settings.display) {
+                        Text("All displays").tag("all")
+                        Text("Main display").tag("main")
+                        ForEach(screens, id: \.displayID) { screen in Text(screen.localizedName).tag(screen.displayID) }
+                        if settings.display != "all", settings.display != "main", !screens.contains(where: { $0.displayID == settings.display }) {
+                            Text("Disconnected display (using main)").tag(settings.display)
+                        }
+                    }.labelsHidden().frame(width: 190)
+                }
                 settingRow("Animation speed", "How briskly the deck moves", divider: false) { AccentSegmentedPicker(selection: $settings.animationSpeed, options: [(.fast, "Fast"), (.normal, "Normal"), (.slow, "Slow")], accessibilityLabel: "Animation speed").frame(width: 195, height: 28) }
             }
         }
@@ -1461,6 +1634,14 @@ struct SettingsView: View {
             settingsSection("Writing") {
                 settingRow("Handwriting", "The face your notes are written in") { Picker("", selection: $settings.fontName) { ForEach(noteFontNames, id: \.self) { Text($0).font(.custom($0, size: 14)) } }.frame(width: 160) }
                 settingRow("Text size", "Body text in notes", divider: false) { Picker("", selection: $settings.textSize) { ForEach([10.0, 12.0, 14.0, 16.0, 18.0, 21.0, 24.0, 28.0], id: \.self) { Text("\(Int($0)) pt").tag($0) } }.frame(width: 90) }
+            }
+            settingsSection("Markdown & sharing") {
+                settingRow("Markdown formatting", "Use headings, emphasis, lists, links and code in notes") {
+                    Toggle("Markdown formatting", isOn: $settings.markdownEnabled).toggleStyle(.switch).labelsHidden()
+                }
+                settingRow("Show Share button", "Share individual notes as Markdown files", divider: false) {
+                    Toggle("Show Share button", isOn: $settings.shareNotes).toggleStyle(.switch).labelsHidden()
+                }
             }
             settingsSection("New notes") {
                 settingRow("Default note color", "Otherwise new notes rotate through every color", divider: false) {
@@ -1475,13 +1656,25 @@ struct SettingsView: View {
 
     private var shortcuts: some View {
         VStack(alignment: .leading, spacing: 22) {
-            heading("Shortcuts", "Open Margin from anywhere.")
-            settingsSection("Global shortcut") {
-                settingRow("Shortcut", "Click the shortcut, then press a new key combination") { ShortcutRecorder(shortcut: $settings.quickShortcut).frame(width: 132, height: 28) }
-                settingRow("Action", "Choose what opens from anywhere", divider: false) {
+            heading("Keyboard", "Click a shortcut, then press a new key combination. Escape cancels.")
+            settingsSection("Shortcuts") {
+                ForEach(KeyboardAction.allCases, id: \.rawValue) { action in
+                    settingRow(action.title, action.isGlobal ? "Works from any app" : "While a Margin window is active", divider: action != .close) {
+                        ShortcutRecorder(shortcut: settings.shortcut(for: action), changed: { settings.setShortcut($0, for: action) })
+                            .frame(width: 145, height: 28).accessibilityLabel(action.title)
+                    }
+                }
+            }
+            settingsSection("Quick capture") {
+                settingRow("Action", "Choose what quick capture opens", divider: false) {
                     Picker("", selection: $settings.shortcutAction) { ForEach(ShortcutAction.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 155)
                 }
             }
+            if let error = settings.shortcutError {
+                Label(error, systemImage: "exclamationmark.triangle.fill").font(.system(size: 12)).foregroundStyle(.red)
+            }
+            Button("Restore default shortcuts") { settings.shortcuts = [:]; settings.shortcutError = nil }
+                .buttonStyle(MatteButtonStyle()).fixedSize()
         }
     }
 
@@ -1523,7 +1716,6 @@ struct SettingsView: View {
             heading("System", "Control how Margin behaves on your Mac.")
             settingsSection("Windows") {
                 settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(appAccent) }
-                settingRow("Show on all displays", "Turn off to keep the deck on the main display only") { Toggle("Show on all displays", isOn: $settings.showOnAllScreens).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
                 settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(appAccent) }
             }

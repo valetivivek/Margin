@@ -1,6 +1,6 @@
 # Releasing Margin
 
-Update the short version and build number in `Info.plist`, update `CHANGELOG.md`, then run:
+Update the short version and build number in `Info.plist`, then add detailed release notes under a matching `## VERSION - DATE` heading in `CHANGELOG.md`. The release workflow uses that section as the published GitHub release description. Then run:
 
 ```sh
 ./scripts/package-dmg.sh

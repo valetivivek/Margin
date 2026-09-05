@@ -35,11 +35,11 @@
 
 - **Fast capture** — press `⌥⌘N` from anywhere to create a note.
 - **Edge deck** — hover for a preview, click to write, and drag to reorder.
-- **Focused editor** — autosave, checklists, clickable links, colors, and pinning.
+- **Focused editor** — autosave, aligned checklists, Markdown formatting, clickable links, colors, and pinning.
 - **Full library** — search, archive, restore, import, and export your notes.
-- **Your displays, your choice** — show Margin on every display or only the main one.
+- **Your displays, your choice** — choose a connected display, the main display (default), or all displays.
 - **Automatic updates** — receive signed releases automatically, or manage updates in **Settings → Info → About**.
-- **Optional sync** — write readable Markdown files to a folder you control.
+- **Markdown sharing** — drag a deck card to the Desktop or Finder to export it, or use the note’s Share button.
 - **Quiet when needed** — keep Margin in the menu bar without a Dock icon.
 - **Comfortable in any theme** — light by default, with system and dark appearances plus high-contrast selected states.
 
@@ -57,29 +57,38 @@ Margin requires macOS 13 Ventura or newer.
 | --- | --- |
 | `⌥⌘N` | Create a new note from anywhere |
 | `⌥⌘L` | Open the complete note library |
+| `⌥⌘A` | Open the Archive |
+| `⌥⌘E` | Cycle the deck between left, right, and bottom |
+| `⌃⌥⌘H` | Hide or show the deck and notes |
+| `⌘,` | Open Settings, including from a note |
 | `Esc` or `⌘W` | Save and close the current note |
+| `⌘W` | Close All Notes, Archive, or Settings |
 | `⌘.` | Cycle the current note color |
 | `⌘⌫` | Delete the current note |
 
-The quick-capture shortcut and its action can be changed in **Settings → Shortcuts**.
+Shortcuts and the quick-capture action can be changed in **Settings → Keyboard**. Conflicting shortcuts are rejected; Escape cancels recording.
 
 ## Settings
 
 Open **Settings** from the Margin menu-bar icon:
 
-- **General** controls the screen edge, fan behavior, and animation speed.
-- **Notes** controls type, text size, and the default note color.
-- **Cloud Sync** selects and manages an optional Markdown folder.
-- **Shortcuts** changes the global shortcut and its action.
-- **System** controls Dock and display behavior, full-screen access, and note locking.
+- **General** controls the screen edge, display, fan behavior, activation delay (0–1 second, default 50 ms), and animation speed.
+- **Notes** controls type, text size, default note color, Markdown formatting, and whether the Share button appears.
+- **Cloud Sync** is dimmed and unavailable in this build; background sync is paused.
+- **Keyboard** configures shortcuts and the quick-capture action.
+- **System** controls Dock / ⌘-Tab visibility, full-screen access, and note locking.
 - **Appearance** switches between light, system, and dark themes.
 - **Info → About** shows the public app version and contains **Automatic updates** and **Check Now**.
 
-Selected tabs, options, filters, and rows use a blue accent together with borders, checkmarks, or font weight so selection remains clear in dark mode and does not rely on color alone.
+Drag the dotted grip below **+** to slide the deck along an edge or move it to the left, right, or bottom of a display. An animated highlight previews a valid docking edge. Release elsewhere and it returns to its saved position. The collapsed activation strip is 12 points wide. Settings can be resized.
+
+Selected Settings menus use a blue accent, border, and font weight without a checkmark. Margin appears in ⌘-Tab when **Show in Dock** is enabled (the default).
+
+Markdown formats automatically as you type, hiding formatting markers while preserving the original source for editing and export. Headings (`#` through `######`), bold, italic, strikethrough, links, code, quotes, and tables receive formatting. Helvetica is the default note font. Checklist boxes remain clickable. Exporting or sharing creates a copy named after the note, such as `Launch_plan.md`; the original stays in Margin.
 
 ## Privacy
 
-No account, analytics, advertising, or telemetry. Local notes are encrypted on your Mac. Folder sync is optional and off by default; when enabled, its Markdown files are readable so other apps can use them.
+No account, analytics, advertising, or telemetry. Local notes are encrypted on your Mac. Cloud Sync is unavailable in this build. Exported and shared Markdown files are readable by other apps.
 
 Read the complete [privacy notes](PRIVACY.md).
 

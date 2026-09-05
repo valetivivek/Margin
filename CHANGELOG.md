@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.1.0 - 2026-09-05
+
+Margin 1.1.0 adds direct deck positioning, automatic Markdown formatting and file sharing, configurable keyboard shortcuts, and more control over where and when the deck appears. It also restores the familiar edge-attached note preview and refines editor alignment.
+
+### Move the deck directly
+
+- A dotted drag grip now sits below **+**. Drag it to slide the deck along its current edge, or move it to the **left, right, or bottom** of a display.
+- An animated docking highlight appears near a supported edge so you can see where the deck will land before releasing it.
+- Releasing in the middle of the screen or another unsupported area returns the deck to its previous position without saving an invalid location.
+- The grip is translucent white at rest and becomes solid white with thicker dots and a subtle highlight on hover.
+- Hovered note cards use the earlier tucked geometry again, keeping them visually connected to the screen edge.
+- A narrower, **12-point collapsed activation strip** reduces accidental reveals. The new **Settings → General → Activation delay** slider runs from **0 to 1 second**, with a **50 ms default**.
+
+### Markdown that formats as you type
+
+- Type headings such as `## Test` and the heading receives formatting automatically while the Markdown markers disappear from view.
+- Formatting includes heading levels 1–6, bold, italic, strikethrough, links, inline code, code blocks, and block quotes. Table content receives monospaced styling.
+- Markdown source stays intact for editing, undo, and export. Turn **Markdown formatting** off in **Settings → Notes** to view the source markers again.
+- Checklist boxes and task text now share consistent baselines and spacing across font choices and sizes; wrapped task text aligns with the first line.
+- Checklist-looking text inside code remains literal code. Links immediately following a checklist retain their correct visible label.
+
+### Share notes as Markdown files
+
+- Drag a deck card to the Desktop or a Finder folder to create a `.md` copy named after the note, for example `Launch_plan.md`. The original note remains in Margin.
+- The note toolbar now includes a native **Share** button for sharing that note as a Markdown file. Its visibility can be toggled in **Settings → Notes → Show Share button**.
+- Export filenames are sanitized and use a single `.md` extension, including when the note title already ends in `.md`.
+- Share, move, and pin controls now use equal-sized slots, centered icons, consistent spacing, and matching muted styling.
+
+### Displays and settings
+
+- **Settings → General → Display** lets you choose the main display, a specific connected display, or all displays. If a selected display is disconnected, Margin falls back to the main display.
+- The default display selection is now **main display only**, and the default note font is **Helvetica**. Previously saved font and display selections remain available.
+- Settings windows can be resized. Selected sidebar menus use an accent highlight without an additional checkmark.
+- Margin now appears in the Dock and **⌘-Tab** by default, including on the first launch after this update. Turn off **Settings → System → Show in Dock** to return to menu-bar-only operation.
+
+### Configurable keyboard shortcuts
+
+Customize these bindings in **Settings → Keyboard**. Duplicate bindings are rejected, and Escape cancels shortcut recording.
+
+| Default shortcut | Action |
+| --- | --- |
+| **⌥⌘N** | Quick capture; creates a new note by default |
+| **⌥⌘L** | Open All Notes |
+| **⌥⌘A** | Open the Archive |
+| **⌥⌘E** | Cycle the deck between left, right, and bottom |
+| **⌃⌥⌘H** | Hide or show the deck and note windows |
+| **⌘,** | Open Settings while a Margin window is active, including from a note |
+| **⌘W** | Close the current note, All Notes, Archive, or Settings window |
+
+The All Notes and Archive defaults are now **⌥⌘L** and **⌥⌘A**, respectively. The quick-capture action is configurable separately from its key binding.
+
+### Cloud Sync availability
+
+**Cloud Sync is temporarily disabled in this release.** Its settings entry is dimmed and cannot be opened, and background folder sync does not run. Existing local notes remain available; Markdown export and sharing continue to work. This release does not add Google Drive or Google Keep integration.
+
+### Download and update
+
+- Requires **macOS 13 Ventura or later**; the universal DMG supports both **Apple silicon and Intel Macs**.
+- Download `Margin-1.1.0-universal.dmg`, or use **Settings → Info → About → Check Now** in an installed copy.
+- Release assets include the DMG, its **SHA-256 checksum**, and the **signed Sparkle update feed** for automatic updates.
+
 ## 1.0.3 - 2026-09-03
 
 - Preserve the last editor position when a note closes instead of recording the close animation.

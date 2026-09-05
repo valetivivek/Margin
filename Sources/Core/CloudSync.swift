@@ -216,7 +216,7 @@ enum CloudSyncEngine {
         return (title.isEmpty ? fallbackTitle : title, body)
     }
 
-    private static func safeFilename(_ title: String) -> String {
+    static func safeFilename(_ title: String) -> String {
         let invalid = CharacterSet(charactersIn: "/:\\?*\"<>|\0").union(.newlines)
         let cleaned = title.components(separatedBy: invalid).joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
         return String((cleaned.isEmpty ? "Untitled note" : cleaned).prefix(80))
