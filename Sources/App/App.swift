@@ -1138,11 +1138,15 @@ enum AppSelfCheck {
         timedEditor.string = "## Idle preview"
         timedEditor.previewDelay = 0.01
         dragWindow.contentView = timedEditor
+        dragWindow.makeFirstResponder(timedEditor)
         timedEditor.beginSourceEditing()
         timedEditor.setSelectedRange(NSRange(location: (timedEditor.string as NSString).length, length: 0))
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        let previewDeadline = Date().addingTimeInterval(2)
+        while !timedEditor.isPreview, Date() < previewDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         guard timedEditor.isPreview, timedEditor.string == "## Idle preview" else {
-            throw SelfCheckFailure("Idle timer does not return to preview losslessly")
+            throw SelfCheckFailure("Idle timer does not return to preview losslessly (selection: \(timedEditor.selectedRange()), marked text: \(timedEditor.hasMarkedText()), mouse buttons: \(NSEvent.pressedMouseButtons))")
         }
         dragWindow.contentView = dragHandle
         var began = false

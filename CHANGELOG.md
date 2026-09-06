@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.2.0 - 2026-09-06
+## 1.2.1 - 2026-09-06
 
-Margin 1.2.0 refreshes Settings with a warm oyster palette, Satoshi typography, and a single page for each tab.
+Margin 1.2.1 refreshes Settings with a warm oyster palette, Satoshi typography, and a single page for each tab.
 
 - Integrated the window header and simplified the layout, with consistent sliders, dropdowns, and shortcut controls.
 - Added five Settings accent colors and clearer controls for cycling or choosing a fixed new-note color.
