@@ -99,8 +99,8 @@ enum DeckPlacement {
         let bottom = side == .bottom
         let expandedWidth = min(bottom ? max(280, CGFloat(count) * DeckCardMetrics.bottomStep + 160) : 480, visible.width)
         let expandedHeight = min(bottom ? 280 : DeckCardMetrics.stackHeight(count: count) + 120, visible.height)
-        let width = expanded ? expandedWidth : (bottom ? max(38, CGFloat(count) * 22 + 20) : 12)
-        let height = expanded ? expandedHeight : (bottom ? 12 : max(18, CGFloat(count) * 22 + 12))
+        let width: CGFloat = count == 0 ? 40 : expanded ? expandedWidth : (bottom ? max(38, CGFloat(count) * 22 + 20) : 12)
+        let height: CGFloat = count == 0 ? 40 : expanded ? expandedHeight : (bottom ? 12 : max(18, CGFloat(count) * 22 + 12))
         let fraction = min(1, max(0, position))
         // Use the same anchor when closed and open so the dots and notes never jump.
         let centerX = min(max(screen.minX + screen.width * fraction, visible.minX + expandedWidth / 2), visible.maxX - expandedWidth / 2)
@@ -112,6 +112,30 @@ enum DeckPlacement {
     static func collectionBehavior(overFullScreen: Bool) -> NSWindow.CollectionBehavior {
         overFullScreen ? [.canJoinAllSpaces, .fullScreenAuxiliary] : [.canJoinAllSpaces, .fullScreenNone]
     }
+
+    static func hasFullScreenWindow(on screen: CGRect, windows: [[String: Any]], ownPID: Int32 = ProcessInfo.processInfo.processIdentifier) -> Bool {
+        func bounds(_ window: [String: Any]) -> CGRect? {
+            (window[kCGWindowBounds as String] as? [String: Any]).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+        }
+        return windows.contains { window in
+            guard let pid = window[kCGWindowOwnerPID as String] as? Int32, pid != ownPID,
+                  window[kCGWindowLayer as String] as? Int == 0, let frame = bounds(window),
+                  frame.minX <= screen.minX + 1, frame.maxX >= screen.maxX - 1,
+                  frame.maxY >= screen.maxY - 1 else { return false }
+            if frame.minY <= screen.minY + 1 { return true }
+            // Helium splits fullscreen into a content window and its own menu-bar window.
+            // A maximized desktop window has no matching companion and stays visible.
+            // ponytail: match the current browser chrome geometry; revise if its window layout changes.
+            let header = CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: frame.minY - screen.minY)
+            guard header.height <= 80 else { return false }
+            return windows.contains { companion in
+                guard companion[kCGWindowOwnerPID as String] as? Int32 == pid,
+                      let layer = companion[kCGWindowLayer as String] as? Int, (24...30).contains(layer),
+                      let frame = bounds(companion) else { return false }
+                return frame.insetBy(dx: -1, dy: -1).contains(header)
+            }
+        }
+    }
 }
 
 final class EdgePanelModel: ObservableObject {
@@ -119,11 +143,14 @@ final class EdgePanelModel: ObservableObject {
     @Published var fanVisible = false
     @Published var noteLimit = 8
     var dragging = false
+    @Published var side: ScreenSide = .right
+    var reorderingNote: UUID?
+    let cardGesture = HeldCardGesture()
 }
 
 final class EdgePanelController: NSWindowController {
     static let expandedSize = NSSize(width: 480, height: 684)
-    let screen: NSScreen
+    var screen: NSScreen
     let model = EdgePanelModel()
     private let settings: AppSettings
     private let store: NotesStore
@@ -132,12 +159,12 @@ final class EdgePanelController: NSWindowController {
     private var notesObservation: AnyCancellable?
     private var hidden = false
     private var dockingPreview: NSPanel?
-    private var animatePlacement = false
 
     init(screen: NSScreen, store: NotesStore, settings: AppSettings, coordinator: AppCoordinator) {
         self.screen = screen
         self.settings = settings
         self.store = store
+        model.side = settings.side
         let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init(window: panel)
         panel.isOpaque = false
@@ -159,13 +186,11 @@ final class EdgePanelController: NSWindowController {
             endDrag: { [weak self] moved in
                 guard let self, let frame = self.window?.frame else { return }
                 self.dockingPreview?.orderOut(nil)
-                self.model.dragging = false
-                self.animatePlacement = moved
-                guard moved else { self.refresh(); return }
-                coordinator.dockDeck(at: NSEvent.mouseLocation, center: NSPoint(x: frame.midX, y: frame.midY))
+                guard moved else { self.model.dragging = false; self.refresh(); return }
+                coordinator.dockDeck(self, at: NSEvent.mouseLocation, center: NSPoint(x: frame.midX, y: frame.midY))
             },
-            create: { coordinator.createNote(on: screen) },
-            open: { coordinator.openEditor($0, on: screen) },
+            create: { [weak self] in coordinator.createNote(on: self?.screen) },
+            open: { [weak self] in coordinator.openEditor($0, on: self?.screen) },
             showAll: { coordinator.showAllNotes() },
             showArchive: { coordinator.showArchive() },
             showSettings: { coordinator.showSettings() }
@@ -183,6 +208,7 @@ final class EdgePanelController: NSWindowController {
 
     override func close() {
         activationWork?.cancel(); collapseWork?.cancel()
+        model.cardGesture.end()
         dockingPreview?.close()
         super.close()
     }
@@ -192,6 +218,13 @@ final class EdgePanelController: NSWindowController {
               let side = DeckPlacement.nearestSide(to: point, in: target.frame) else {
             dockingPreview?.orderOut(nil)
             return
+        }
+        // Turn side-mounted cards inward before they pass off the opposite screen edge.
+        if model.side != .bottom, side != .bottom, model.side != side, let window {
+            model.side = side
+            window.setFrameOrigin(NSPoint(x: side == .left ? point.x - 20 : point.x + 20 - window.frame.width,
+                                          y: window.frame.minY))
+            window.contentView?.layoutSubtreeIfNeeded()
         }
         if dockingPreview == nil {
             let preview = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -232,9 +265,11 @@ final class EdgePanelController: NSWindowController {
     }
 
     func setHidden(_ value: Bool) {
+        guard hidden != value else { return }
         hidden = value
         if value {
             activationWork?.cancel(); activationWork = nil; collapseWork?.cancel()
+            dockingPreview?.orderOut(nil)
             window?.orderOut(nil)
         } else { refresh() }
     }
@@ -243,6 +278,7 @@ final class EdgePanelController: NSWindowController {
         guard !model.dragging else { return }
         activationWork?.cancel(); activationWork = nil
         window?.collectionBehavior = DeckPlacement.collectionBehavior(overFullScreen: settings.showOverFullScreen).union([.stationary, .ignoresCycle])
+        model.side = settings.side
         model.noteLimit = settings.side == .bottom
             ? min(8, max(1, Int((screen.visibleFrame.width - 160) / DeckCardMetrics.bottomStep)))
             : min(8, max(1, Int((screen.visibleFrame.height - 120 - DeckCardMetrics.height) / DeckCardMetrics.step) + 1))
@@ -251,7 +287,7 @@ final class EdgePanelController: NSWindowController {
     }
 
     func setHovered(_ inside: Bool) {
-        guard !model.dragging, !hidden else { return }
+        guard !model.dragging, model.reorderingNote == nil, !hidden, !store.active.isEmpty else { return }
         if !inside { activationWork?.cancel(); activationWork = nil; setExpanded(false); return }
         collapseWork?.cancel()
         if model.expanded { model.fanVisible = true; return }
@@ -265,7 +301,7 @@ final class EdgePanelController: NSWindowController {
     }
 
     func setExpanded(_ value: Bool) {
-        guard !model.dragging, !hidden else { return }
+        guard !model.dragging, model.reorderingNote == nil, !hidden, !store.active.isEmpty else { return }
         collapseWork?.cancel()
         if value {
             activationWork?.cancel(); activationWork = nil
@@ -294,19 +330,37 @@ final class EdgePanelController: NSWindowController {
 
     static func shouldCollapse(pointer: NSPoint, in frame: NSRect) -> Bool { !frame.contains(pointer) }
 
+    func finishDock(on target: NSScreen) {
+        guard let window else { return }
+        let changedEdge = model.side != settings.side || screen != target
+        screen = target
+        model.side = settings.side
+        model.expanded = true; model.fanVisible = true
+        let frame = DeckPlacement.frame(screen: target.frame, visible: target.visibleFrame, side: settings.side,
+                                        position: settings.deckPosition, count: min(store.active.count, model.noteLimit), expanded: true)
+        // Keep the same visible panel through the drop. Do not replay the reveal animation.
+        if changedEdge || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            window.setFrame(frame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                window.animator().setFrame(frame, display: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.model.dragging = false
+            self.refresh()
+        }
+    }
+
     private func resize(expanded: Bool) {
         guard let window else { return }
         model.expanded = expanded
         if !expanded { model.fanVisible = false }
         let frame = DeckPlacement.frame(screen: screen.frame, visible: screen.visibleFrame, side: settings.side,
                                         position: settings.deckPosition, count: min(store.active.count, model.noteLimit), expanded: expanded)
-        if animatePlacement && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                window.animator().setFrame(frame, display: true)
-            }
-        } else { window.setFrame(frame, display: true) }
-        animatePlacement = false
+        window.setFrame(frame, display: true)
         if hidden { window.orderOut(nil) } else { window.orderFrontRegardless() }
     }
 }
@@ -479,6 +533,7 @@ final class AppCoordinator {
     private var settingsWindow: NSWindowController?
     private var onboarding: NSWindowController?
     private var deckHidden = false
+    private var visibilityTimer: Timer?
 
     init(store: NotesStore, settings: AppSettings, cloudSync: CloudSyncController, updater: SPUUpdater) {
         self.store = store; self.settings = settings; self.cloudSync = cloudSync; self.updater = updater
@@ -488,7 +543,14 @@ final class AppCoordinator {
             self.refreshPanels()
         } }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.rebuildPanels() }
+        for event in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in self?.refreshDeckVisibility() }
+        }
+        // Browser fullscreen transitions can happen without an application or Space change.
+        visibilityTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.refreshDeckVisibility() }
     }
+
+    deinit { visibilityTimer?.invalidate() }
 
     func start() {
         // Cloud Sync is intentionally unavailable in this build.
@@ -513,6 +575,7 @@ final class AppCoordinator {
             edges[ObjectIdentifier(screen)] = controller
             controller.setHidden(deckHidden)
         }
+        refreshDeckVisibility()
     }
 
     private var targetScreens: [NSScreen] {
@@ -521,9 +584,24 @@ final class AppCoordinator {
 
     func refreshPanels() {
         let targetIDs = Set(targetScreens.map(ObjectIdentifier.init))
-        if Set(edges.keys) != targetIDs { rebuildPanels() }
-        else { edges.values.forEach { $0.refresh() } }
+        for id in Array(edges.keys) where !targetIDs.contains(id) { edges.removeValue(forKey: id)?.close() }
+        for screen in targetScreens where edges[ObjectIdentifier(screen)] == nil {
+            let controller = EdgePanelController(screen: screen, store: store, settings: settings, coordinator: self)
+            edges[ObjectIdentifier(screen)] = controller
+            controller.setHidden(deckHidden)
+        }
+        edges.values.forEach { $0.refresh() }
         editors.values.forEach { $0.refreshCollectionBehavior() }
+        refreshDeckVisibility()
+    }
+
+    private func refreshDeckVisibility() {
+        let windows = !deckHidden && !settings.showOverFullScreen
+            ? CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [] : []
+        for controller in edges.values {
+            let display = (controller.screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? CGMainDisplayID()
+            controller.setHidden(deckHidden || (!settings.showOverFullScreen && DeckPlacement.hasFullScreenWindow(on: CGDisplayBounds(display), windows: windows)))
+        }
     }
 
     static func targetScreens<Screen>(from screens: [Screen], main: Screen?, selection: String, id: (Screen) -> String) -> [Screen] {
@@ -543,7 +621,7 @@ final class AppCoordinator {
         guard deckHidden != hidden else { return }
         store.flushAll()
         deckHidden = hidden
-        edges.values.forEach { $0.setHidden(hidden) }
+        refreshDeckVisibility()
         editors.values.forEach { if hidden { $0.window?.orderOut(nil) } else { $0.window?.orderFrontRegardless() } }
     }
 
@@ -554,11 +632,10 @@ final class AppCoordinator {
         showDeck()
     }
 
-    func dockDeck(at point: NSPoint, center: NSPoint) {
+    func dockDeck(_ controller: EdgePanelController, at point: NSPoint, center: NSPoint) {
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }),
               let side = DeckPlacement.nearestSide(to: point, in: screen.frame) else {
-            // No preferences change on a rejected drop; refresh restores the saved anchor.
-            refreshPanels()
+            controller.finishDock(on: controller.screen)
             return
         }
         let anchor = side == settings.side ? center : point
@@ -567,6 +644,9 @@ final class AppCoordinator {
             : (anchor.y - screen.frame.minY) / screen.frame.height))
         settings.side = side
         if settings.display != "all" { settings.display = screen.displayID }
+        edges.removeValue(forKey: ObjectIdentifier(controller.screen))
+        if let previous = edges.updateValue(controller, forKey: ObjectIdentifier(screen)), previous !== controller { previous.close() }
+        controller.finishDock(on: screen)
         refreshPanels()
     }
 
@@ -627,10 +707,13 @@ final class AppCoordinator {
 
     func showSettings() {
         if let settingsWindow { settingsWindow.window?.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 840, height: 600), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.contentMinSize = NSSize(width: 780, height: 480)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 740), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.contentMinSize = NSSize(width: 840, height: 720)
         window.title = "Settings"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
-        window.contentView = NSHostingView(rootView: SettingsView(settings: settings, cloudSync: cloudSync, updater: updater))
+        window.isMovableByWindowBackground = true
+        let hosting = NSHostingView(rootView: SettingsView(settings: settings, store: store, cloudSync: cloudSync, updater: updater))
+        hosting.sizingOptions = []
+        window.contentView = hosting
         let controller = NSWindowController(window: window); settingsWindow = controller
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.settingsWindow = nil }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -696,7 +779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appItem = NSMenuItem(); mainMenu.addItem(appItem)
         let appMenu = NSMenu()
         let settingsShortcut = settings?.shortcut(for: .settings) ?? KeyboardAction.settings.standard
-        let settingsItem = appMenu.addItem(withTitle: "Settings…", action: #selector(statusSettings(_:)), keyEquivalent: settingsShortcut.menuKey)
+        let settingsItem = appMenu.addItem(withTitle: "Settings…", action: #selector(statusSettings(_:)), keyEquivalent: settings?.shortcutEnabled(.settings) == false ? "" : settingsShortcut.menuKey)
         settingsItem.keyEquivalentModifierMask = settingsShortcut.eventModifiers
         settingsItem.target = target
         appMenu.addItem(.separator())
@@ -706,7 +789,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fileItem = NSMenuItem(); mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         let closeShortcut = settings?.shortcut(for: .close) ?? KeyboardAction.close.standard
-        let closeItem = fileMenu.addItem(withTitle: "Close", action: #selector(statusCloseWindow(_:)), keyEquivalent: closeShortcut.menuKey)
+        let closeItem = fileMenu.addItem(withTitle: "Close", action: #selector(statusCloseWindow(_:)), keyEquivalent: settings?.shortcutEnabled(.close) == false ? "" : closeShortcut.menuKey)
         closeItem.target = target
         closeItem.keyEquivalentModifierMask = closeShortcut.eventModifiers
         fileItem.submenu = fileMenu
@@ -732,7 +815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(Self.activationPolicy(showInDock: settings.showInDock, uiTest: CommandLine.arguments.contains("--ui-test")))
         NSApp.mainMenu = Self.makeMainMenu(settings: settings, target: self)
         if !CommandLine.arguments.contains("--ui-test") { installHotKeys() }
-        shortcutObservation = settings.$shortcuts.dropFirst().sink { [weak self] _ in
+        shortcutObservation = settings.$shortcuts.combineLatest(settings.$disabledShortcuts).dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.installHotKeys()
@@ -749,13 +832,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.start()
     }
 
-    static func activationPolicy(showInDock: Bool, uiTest: Bool) -> NSApplication.ActivationPolicy { showInDock || uiTest ? .regular : .accessory }
+    static func activationPolicy(showInDock: Bool, uiTest: Bool) -> NSApplication.ActivationPolicy { showInDock ? .regular : .accessory }
 
     private func installHotKeys() {
         guard !shortcutRecording else { return }
         hotKeys = nil // Release old registrations before installing replacements.
         settings.shortcutError = nil
-        let bindings: [(GlobalShortcut, () -> Void)] = KeyboardAction.allCases.filter(\.isGlobal).map { action in
+        let bindings: [(GlobalShortcut, () -> Void)] = KeyboardAction.allCases.filter { $0.isGlobal && settings.shortcutEnabled($0) }.map { action in
             (settings.shortcut(for: action), { [weak self] in
                 guard let self else { return }
                 switch action {
@@ -900,6 +983,28 @@ enum AppSelfCheck {
         guard KeyboardAction.allCases.map({ $0.standard.display }) == ["⌥⌘N", "⌥⌘L", "⌥⌘A", "⌥⌘E", "⌃⌥⌘H", "⌘,", "⌘W"] else {
             throw SelfCheckFailure("Default keyboard shortcuts do not match the requested actions")
         }
+        func externalWindow(_ frame: CGRect, layer: Int = 0, pid: Int32 = 101) -> [String: Any] {
+            [kCGWindowOwnerPID as String: pid, kCGWindowLayer as String: layer, kCGWindowBounds as String: frame.dictionaryRepresentation]
+        }
+        let display = CGRect(x: 0, y: 0, width: 2560, height: 1440)
+        let browser = externalWindow(CGRect(x: 0, y: 30, width: 2560, height: 1410))
+        let browserMenu = externalWindow(CGRect(x: 0, y: 0, width: 2560, height: 30), layer: 26)
+        let otherDisplay = CGRect(x: -1710, y: 0, width: 1710, height: 1112)
+        guard DeckPlacement.hasFullScreenWindow(on: display, windows: [externalWindow(display)]),
+              DeckPlacement.hasFullScreenWindow(on: display, windows: [browser, browserMenu]),
+              !DeckPlacement.hasFullScreenWindow(on: display, windows: [browser]),
+              !DeckPlacement.hasFullScreenWindow(on: display, windows: [browser, externalWindow(CGRect(x: 0, y: 0, width: 2560, height: 30), layer: 26, pid: 102)]),
+              !DeckPlacement.hasFullScreenWindow(on: display, windows: [externalWindow(display)], ownPID: 101),
+              !DeckPlacement.hasFullScreenWindow(on: otherDisplay, windows: [browser, browserMenu]),
+              DeckPlacement.hasFullScreenWindow(on: otherDisplay, windows: [externalWindow(otherDisplay)]) else {
+            throw SelfCheckFailure("Fullscreen visibility confuses Helium, maximized windows, or another display")
+        }
+        var privateNote = Note(); privateNote.title = "Private title"; privateNote.body = "Private body"
+        guard SettingsView.previewContent(notes: [privateNote], locked: false, index: 0).body == privateNote.body,
+              SettingsView.previewContent(notes: [privateNote], locked: true, index: 0).body != privateNote.body,
+              !SettingsView.previewContent(notes: [], locked: false, index: 0).body.isEmpty else {
+            throw SelfCheckFailure("Settings preview ignores real notes or exposes locked notes")
+        }
         let deckFrame = NSRect(origin: NSPoint(x: 100, y: 100), size: EdgePanelController.expandedSize)
         guard !EdgePanelController.shouldCollapse(pointer: NSPoint(x: 579, y: 210), in: deckFrame) else {
             throw SelfCheckFailure("Deck collapses while the cursor is still inside it")
@@ -928,6 +1033,18 @@ enum AppSelfCheck {
               contrastRatio(MarginPalette.accent(isDark: false), MarginPalette.selectionSurface(isDark: false)) >= 4.5,
               contrastRatio(MarginPalette.selectionBorder(isDark: false), MarginPalette.selectionSurface(isDark: false)) >= 3 else {
             throw SelfCheckFailure("Selected controls do not have enough contrast")
+        }
+        for isDark in [false, true] {
+            let background = SettingsPalette.color(isDark ? 0x23231F : 0xF3F1EC)
+            let secondary = SettingsPalette.color(isDark ? 0xB8B4A9 : 0x65625B)
+            guard contrastRatio(secondary, background) >= 4.5,
+                  InterfaceColor.allCases.allSatisfy({ contrastRatio($0.nsColor(isDark: isDark), background) >= 4.5 }) else {
+                throw SelfCheckFailure("Settings colors do not have enough contrast")
+            }
+        }
+        guard NSFont(name: "Satoshi-Regular", size: 13) != nil,
+              NSFont(name: "Satoshi-Medium", size: 13) != nil else {
+            throw SelfCheckFailure("Settings typography is missing from the app bundle")
         }
         guard !DeckHoverGate.isReady(now: 1, readyAt: 2), DeckHoverGate.isReady(now: 2, readyAt: 2) else {
             throw SelfCheckFailure("Deck hover activates before the fan settles")
@@ -984,6 +1101,24 @@ enum AppSelfCheck {
               (markdownEditor.textStorage?.attribute(.font, at: website.location, effectiveRange: nil) as? NSFont)?.pointSize == 16 else {
             throw SelfCheckFailure("Markdown links after checklist continuations lose their label")
         }
+        let sourceBeforeEditing = markdownEditor.string
+        markdownEditor.beginSourceEditing()
+        guard !markdownEditor.isPreview,
+              (markdownEditor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == 16,
+              markdownEditor.checkboxRect(at: (markdownEditor.string as NSString).range(of: "- [ ]").location) == nil else {
+            throw SelfCheckFailure("Editing mode still hides Markdown or draws preview checkboxes")
+        }
+        markdownEditor.showPreview()
+        guard markdownEditor.isPreview, markdownEditor.string == sourceBeforeEditing,
+              (markdownEditor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == 0.01 else {
+            throw SelfCheckFailure("Returning to preview changes source or fails to format")
+        }
+        for side in ScreenSide.allCases {
+            let empty = DeckPlacement.frame(screen: screen, visible: screen, side: side, position: 0.5, count: 0, expanded: false)
+            guard empty.size == NSSize(width: 40, height: 40), screen.contains(empty) else {
+                throw SelfCheckFailure("Empty deck does not fit its single Add button")
+            }
+        }
         let exported = NoteFile(note: Note(title: "../My: note/✓", body: markdown))
         let exportedURL = try exported.write()
         defer { try? FileManager.default.removeItem(at: exportedURL.deletingLastPathComponent()) }
@@ -999,9 +1134,20 @@ enum AppSelfCheck {
         dragWindow.isReleasedWhenClosed = false
         defer { dragWindow.close() }
         let dragHandle = DragHandleNSView(frame: NSRect(x: 0, y: 0, width: 32, height: 16))
+        let timedEditor = ChecklistNSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        timedEditor.string = "## Idle preview"
+        timedEditor.previewDelay = 0.01
+        dragWindow.contentView = timedEditor
+        timedEditor.beginSourceEditing()
+        timedEditor.setSelectedRange(NSRange(location: (timedEditor.string as NSString).length, length: 0))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        guard timedEditor.isPreview, timedEditor.string == "## Idle preview" else {
+            throw SelfCheckFailure("Idle timer does not return to preview losslessly")
+        }
         dragWindow.contentView = dragHandle
         var began = false
         var completed: [Bool] = []
+        dragHandle.screenPointer = { dragWindow.convertPoint(toScreen: $0.locationInWindow) }
         dragHandle.willDrag = { began = true }
         dragHandle.didDrag = { completed.append($0) }
         func dragEvent(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
@@ -1019,6 +1165,64 @@ enum AppSelfCheck {
         dragHandle.mouseDown(with: dragEvent(.leftMouseDown, NSPoint(x: 10, y: 8)))
         dragHandle.mouseUp(with: dragEvent(.leftMouseUp, NSPoint(x: 10, y: 8)))
         guard completed == [true, false] else { throw SelfCheckFailure("Deck drops do not distinguish a drag from a click") }
+        // Moving/reorienting the window must not feed back into the next pointer delta.
+        var pointer = NSPoint(x: 800, y: 400)
+        dragHandle.screenPointer = { _ in pointer }
+        dragHandle.mouseDown(with: dragEvent(.leftMouseDown, .zero))
+        pointer.x = 30
+        dragHandle.mouseDragged(with: dragEvent(.leftMouseDragged, .zero))
+        dragWindow.setFrameOrigin(NSPoint(x: 10, y: 200))
+        pointer.x = 25
+        dragHandle.mouseDragged(with: dragEvent(.leftMouseDragged, NSPoint(x: 999, y: 0)))
+        guard dragWindow.frame.minX == 5 else { throw SelfCheckFailure("Reorienting left feeds window motion into pointer tracking") }
+        pointer.x = 800
+        dragHandle.mouseDragged(with: dragEvent(.leftMouseDragged, .zero))
+        guard dragWindow.frame.minX == 780 else { throw SelfCheckFailure("Rightward drag uses stale window coordinates") }
+        dragHandle.mouseUp(with: dragEvent(.leftMouseUp, .zero))
+
+        let card = DeckCardInteractionView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        dragWindow.contentView = card
+        var moves: [Int] = []
+        var opens = 0
+        card.reorder = { moves.append($0) }; card.activate = { opens += 1 }
+        card.mouseDown(with: dragEvent(.leftMouseDown, NSPoint(x: 10, y: 10)))
+        let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: -1, wheel2: 0, wheel3: 0)!
+        card.scrollWheel(with: NSEvent(cgEvent: wheel)!)
+        card.mouseUp(with: dragEvent(.leftMouseUp, NSPoint(x: 10, y: 10)))
+        guard moves.count == 1, opens == 0 else { throw SelfCheckFailure("Held-card scrolling opens the note or fails to reorder") }
+        card.mouseDown(with: dragEvent(.leftMouseDown, NSPoint(x: 10, y: 10)))
+        card.mouseUp(with: dragEvent(.leftMouseUp, NSPoint(x: 10, y: 10)))
+        guard opens == 1 else { throw SelfCheckFailure("Normal card clicks stopped opening notes") }
+        // A hold belongs to the deck, even when SwiftUI detaches/replaces its card view.
+        let held = HeldCardGesture()
+        card.gesture = held
+        moves = []
+        card.mouseDown(with: dragEvent(.leftMouseDown, NSPoint(x: 10, y: 10)))
+        for _ in 0..<4 { card.scrollWheel(with: NSEvent(cgEvent: wheel)!) }
+        guard moves == [-1, -1, -1, -1] else { throw SelfCheckFailure("Mouse-wheel reordering has the wrong direction or drops rapid ticks") }
+        dragWindow.contentView = NSView()
+        held.scroll(with: NSEvent(cgEvent: wheel)!)
+        let reverseWheel = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0)!
+        held.scroll(with: NSEvent(cgEvent: reverseWheel)!)
+        guard held.active, moves.count == 6, moves[4] == -moves[5] else {
+            throw SelfCheckFailure("Card relocation ends a hold or loses a quick wheel reversal")
+        }
+        held.end()
+        held.scroll(with: NSEvent(cgEvent: wheel)!)
+        guard moves.count == 6 else { throw SelfCheckFailure("Reordering continues after release") }
+        moves = []
+        held.begin(reorder: { moves.append($0) }, finished: {})
+        let precise = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -5, wheel2: 0, wheel3: 0)!
+        for _ in 0..<4 { held.scroll(with: NSEvent(cgEvent: precise)!) }
+        guard moves == [-1] else { throw SelfCheckFailure("Trackpad reordering has the wrong direction or loses small deltas") }
+        held.end()
+        timedEditor.beginSourceEditing()
+        timedEditor.mouseExited(with: dragEvent(.mouseMoved, .zero))
+        guard timedEditor.isPreview else { throw SelfCheckFailure("Leaving a note does not return to preview") }
+        let deckPreview = String(NoteMarkdown.preview("## Heading\n**Bold**\n- [ ] Task", font: .systemFont(ofSize: 16)).characters)
+        guard deckPreview.contains("Heading"), deckPreview.contains("Bold"), deckPreview.contains("☐ Task"), !deckPreview.contains("##"), !deckPreview.contains("**") else {
+            throw SelfCheckFailure("Deck cards expose raw Markdown markers")
+        }
         for fontName in ["Helvetica", "Virgil", "Caveat", "Comic Neue", "Bradley Hand", "Chalkboard SE", "Marker Felt", "Noteworthy", "Nunito", "Avenir Next", "American Typewriter", "Cascadia Code", "Inconsolata"] {
             for size in [10.0, 14.0, 21.0, 28.0] {
                 for prefix in ["- [ ] ", "- [x] ~~"] {

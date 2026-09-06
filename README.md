@@ -38,7 +38,7 @@
 - **Focused editor** — autosave, aligned checklists, Markdown formatting, clickable links, colors, and pinning.
 - **Full library** — search, archive, restore, import, and export your notes.
 - **Your displays, your choice** — choose a connected display, the main display (default), or all displays.
-- **Automatic updates** — receive signed releases automatically, or manage updates in **Settings → Info → About**.
+- **Automatic updates** — receive signed releases automatically, or manage updates in **Settings → About**.
 - **Markdown sharing** — drag a deck card to the Desktop or Finder to export it, or use the note’s Share button.
 - **Quiet when needed** — keep Margin in the menu bar without a Dock icon.
 - **Comfortable in any theme** — light by default, with system and dark appearances plus high-contrast selected states.
@@ -66,25 +66,25 @@ Margin requires macOS 13 Ventura or newer.
 | `⌘.` | Cycle the current note color |
 | `⌘⌫` | Delete the current note |
 
-Shortcuts and the quick-capture action can be changed in **Settings → Keyboard**. Conflicting shortcuts are rejected; Escape cancels recording.
+Each shortcut can be enabled or disabled independently, and its binding and quick-capture action can be changed in **Settings → Keyboard**. Conflicting shortcuts are rejected; Escape cancels recording.
 
 ## Settings
 
 Open **Settings** from the Margin menu-bar icon:
 
 - **General** controls the screen edge, display, fan behavior, activation delay (0–1 second, default 50 ms), and animation speed.
-- **Notes** controls type, text size, default note color, Markdown formatting, and whether the Share button appears.
+- **Notes** controls Markdown formatting, preview delay, and whether the Share button appears.
 - **Cloud Sync** is dimmed and unavailable in this build; background sync is paused.
 - **Keyboard** configures shortcuts and the quick-capture action.
-- **System** controls Dock / ⌘-Tab visibility, full-screen access, and note locking.
-- **Appearance** switches between light, system, and dark themes.
-- **Info → About** shows the public app version and contains **Automatic updates** and **Check Now**.
+- **System** controls Dock / ⌘-Tab visibility, full-screen access (on by default), and note locking. Saved fullscreen choices are preserved; turning access off also hides the deck over Helium.
+- **Appearance** offers light, dark, and system themes, five Settings accent colors, note typeface, text size, and new-note colors with a live preview. Existing preferences carry over automatically.
+- **About** shows the public app version and contains **Automatic updates** and **Check Now**.
 
-Drag the dotted grip below **+** to slide the deck along an edge or move it to the left, right, or bottom of a display. An animated highlight previews a valid docking edge. Release elsewhere and it returns to its saved position. The collapsed activation strip is 12 points wide. Settings can be resized.
+Drag the dotted grip below **+** to slide the deck along an edge or move it to the left, right, or bottom of a display. An animated highlight previews a valid docking edge. Release elsewhere and it returns to its saved position. The collapsed activation strip is 12 points wide. Settings can be resized. An empty deck shows only **+**. Hold the left mouse button on a deck card and scroll to reorder it; scrolling also reorders during a note drag.
 
-Selected Settings menus use a blue accent, border, and font weight without a checkmark. Margin appears in ⌘-Tab when **Show in Dock** is enabled (the default).
+Settings use warm oyster surfaces and Satoshi typography, with an underline and selected states in your chosen accent. New notes keep rotating colors unless you choose a fixed color. **Show in Dock** is off by default. Enable it to include Margin in the Dock and ⌘-Tab.
 
-Markdown formats automatically as you type, hiding formatting markers while preserving the original source for editing and export. Headings (`#` through `######`), bold, italic, strikethrough, links, code, quotes, and tables receive formatting. Helvetica is the default note font. Checklist boxes remain clickable. Exporting or sharing creates a copy named after the note, such as `Launch_plan.md`; the original stays in Margin.
+Notes open in Markdown preview. Click the body or begin typing to edit the plain source; formatting returns when the pointer leaves the note, focus moves elsewhere, or after an idle delay (5 seconds by default, adjustable from 1–60 seconds in Settings → Notes). Editing never hides characters or reparses Markdown on each keystroke. Headings (`#` through `######`), bold, italic, strikethrough, links, code, quotes, and tables receive formatting. Helvetica is the default note font. Checklist boxes remain clickable in preview. The editor scrolls in both modes with a slim native overlay scrollbar and uses macOS spelling correction and grammar suggestions. Exporting or sharing creates a copy named after the note, such as `Launch_plan.md`; the original stays in Margin.
 
 ## Privacy
 

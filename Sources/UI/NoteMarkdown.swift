@@ -44,6 +44,26 @@ struct NoteFile: Transferable {
 }
 
 enum NoteMarkdown {
+    static func preview(_ source: String, font: NSFont) -> AttributedString {
+        let text = NSTextStorage(string: source, attributes: [.font: font, .foregroundColor: NSColor.black.withAlphaComponent(0.76)])
+        let codeRanges = apply(to: text, font: font)
+        var checklists: [(NSRange, Bool)] = []
+        (source as NSString).enumerateSubstrings(in: NSRange(location: 0, length: (source as NSString).length), options: [.byLines]) { line, range, _, _ in
+            if let line, let task = ChecklistLine.parse(line), !codeRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }) {
+                checklists.append((NSRange(location: range.location, length: 6), task.checked))
+            }
+        }
+        for (range, checked) in checklists.reversed() {
+            text.replaceCharacters(in: range, with: NSAttributedString(string: checked ? "☑ " : "☐ ", attributes: [.font: font]))
+        }
+        var markers: [NSRange] = []
+        text.enumerateAttribute(.font, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            if let font = value as? NSFont, font.pointSize < 1 { markers.append(range) }
+        }
+        for range in markers.reversed() { text.deleteCharacters(in: range) }
+        return AttributedString(text)
+    }
+
     // Style the source in place so editing, undo, copy and exported Markdown stay lossless.
     static func apply(to storage: NSTextStorage, font: NSFont) -> [NSRange] {
         let source = storage.string

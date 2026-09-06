@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0 - 2026-09-06
+
+Margin 1.2.0 refreshes Settings with a warm oyster palette, Satoshi typography, and a single page for each tab.
+
+- Integrated the window header and simplified the layout, with consistent sliders, dropdowns, and shortcut controls.
+- Added five Settings accent colors and clearer controls for cycling or choosing a fixed new-note color.
+- Made the live preview reflect your notes, typeface, text size, Markdown formatting, and new-note colors. Saved preferences carry over automatically.
+- Enabled **Show over full-screen apps** by default for new preferences. Existing choices are preserved, and turning it off now hides the deck correctly over Helium.
+- Improved Markdown preview and source editing, with an adjustable idle delay and formatted deck previews.
+- Added individual shortcut toggles, hold-and-scroll deck reordering, and smoother deck positioning. An empty deck shows only **+**; new installations start in menu-bar mode.
+
+Requires macOS 13 or later. The universal DMG supports Apple silicon and Intel Macs; signed automatic updates remain available under **Settings → About**. Cloud Sync remains paused.
+
 ## 1.1.0 - 2026-09-05
 
 Margin 1.1.0 adds direct deck positioning, automatic Markdown formatting and file sharing, configurable keyboard shortcuts, and more control over where and when the deck appears. It also restores the familiar edge-attached note preview and refines editor alignment.

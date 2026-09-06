@@ -8,3 +8,4 @@ These fonts are distributed under their embedded license terms. The SIL Open Fon
 - Inconsolata — Copyright 2006 The Inconsolata Project Authors.
 - Nunito — Copyright 2014 The Nunito Project Authors.
 - Virgil — Copyright © 2011 Your Own Font Foundry. All rights reserved.
+- Satoshi — Copyright 2017–2021 Indian Type Foundry. Settings typography; distributed under the ITF Free Font License in `Satoshi-LICENSE.txt`. Source: https://www.fontshare.com/fonts/satoshi.

@@ -210,6 +210,8 @@ final class DragHandleNSView: NSView {
     private var hovered = false
     private var hoverArea: NSTrackingArea?
     private var dragStart: (frame: NSRect, pointer: NSPoint)?
+    private var lastDragPointer = NSPoint.zero
+    var screenPointer: (NSEvent) -> NSPoint = { _ in NSEvent.mouseLocation }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -223,15 +225,17 @@ final class DragHandleNSView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
         guard willDrag != nil else { window.performDrag(with: event); return }
-        dragStart = (window.frame, window.convertPoint(toScreen: event.locationInWindow))
+        dragStart = (window.frame, screenPointer(event))
+        lastDragPointer = dragStart!.pointer
         NSCursor.closedHand.push()
         willDrag?()
     }
     override func mouseDragged(with event: NSEvent) {
-        guard let window, let dragStart else { return }
-        let pointer = window.convertPoint(toScreen: event.locationInWindow)
-        window.setFrameOrigin(NSPoint(x: dragStart.frame.minX + pointer.x - dragStart.pointer.x,
-                                      y: dragStart.frame.minY + pointer.y - dragStart.pointer.y))
+        guard let window, dragStart != nil else { return }
+        let pointer = screenPointer(event)
+        window.setFrameOrigin(NSPoint(x: window.frame.minX + pointer.x - lastDragPointer.x,
+                                      y: window.frame.minY + pointer.y - lastDragPointer.y))
+        lastDragPointer = pointer
         dragging?(pointer)
     }
     override func mouseUp(with event: NSEvent) {
@@ -274,6 +278,136 @@ private struct DragHandle: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: DragHandleNSView, context: Context) { view.willDrag = willDrag; view.dragging = dragging; view.didDrag = didDrag }
+}
+
+final class HeldCardGesture {
+    private var monitor: Any?
+    private var reorder: ((Int) -> Void)?
+    private var finished: (() -> Void)?
+    private var preciseDelta: CGFloat = 0
+    private(set) var active = false
+    private(set) var reordered = false
+
+    func begin(reorder: @escaping (Int) -> Void, finished: @escaping () -> Void) {
+        end()
+        self.reorder = reorder; self.finished = finished
+        active = true; reordered = false; preciseDelta = 0
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseUp]) { [weak self] event in
+            guard let self, self.active else { return event }
+            if event.type == .scrollWheel { self.scroll(with: event); return nil }
+            let consumed = self.reordered
+            self.end()
+            return consumed ? nil : event
+        }
+    }
+
+    func scroll(with event: NSEvent) {
+        guard active, event.momentumPhase.isEmpty, event.scrollingDeltaY != 0 else { return }
+        reordered = true
+        let delta = event.isDirectionInvertedFromDevice ? event.scrollingDeltaY : -event.scrollingDeltaY
+        if event.hasPreciseScrollingDeltas {
+            if preciseDelta * delta < 0 { preciseDelta = 0 }
+            preciseDelta += delta
+            let steps = Int(preciseDelta / 20)
+            guard steps != 0 else { return }
+            preciseDelta -= CGFloat(steps) * 20
+            reorder?(-steps)
+        } else {
+            // Discrete wheel ticks must never be discarded by a time-based throttle.
+            reorder?(delta > 0 ? -1 : 1)
+        }
+    }
+
+    func end() {
+        if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+        active = false; reorder = nil
+        let callback = finished; finished = nil
+        callback?()
+    }
+
+    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+}
+
+final class DeckCardInteractionView: NSView, NSDraggingSource {
+    var note = Note()
+    var activate: () -> Void = {}
+    var hover: (Bool) -> Void = { _ in }
+    var holding: (Bool) -> Void = { _ in }
+    var reorder: (Int) -> Void = { _ in }
+    var startedDrag: () -> Void = {}
+    var reportError: (String) -> Void = { _ in }
+    private var tracking: NSTrackingArea?
+    var gesture = HeldCardGesture()
+    private var downPoint: NSPoint?
+    private var downFrame = NSRect.zero
+    private var exporting = false
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area); tracking = area
+    }
+    override func mouseEntered(with event: NSEvent) { hover(true) }
+    override func mouseMoved(with event: NSEvent) { hover(true) }
+    override func mouseExited(with event: NSEvent) { if !gesture.active { hover(false) } }
+    override func mouseDown(with event: NSEvent) {
+        downPoint = NSEvent.mouseLocation; exporting = false
+        downFrame = window?.convertToScreen(convert(bounds, to: nil)) ?? .zero
+        gesture.begin(reorder: reorder, finished: { [holding] in holding(false) })
+        holding(true)
+    }
+    override func scrollWheel(with event: NSEvent) {
+        gesture.scroll(with: event)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard let downPoint, gesture.active, !exporting, !gesture.reordered else { return }
+        let point = NSEvent.mouseLocation
+        guard hypot(point.x - downPoint.x, point.y - downPoint.y) > 6,
+              !downFrame.insetBy(dx: -8, dy: -8).contains(point) else { return }
+        do {
+            let url = try NoteFile(note: note).write()
+            let item = NSPasteboardItem()
+            item.setString(url.absoluteString, forType: .fileURL)
+            item.setString(note.id.uuidString, forType: NSPasteboard.PasteboardType(NoteFile.dragType.identifier))
+            let dragItem = NSDraggingItem(pasteboardWriter: item)
+            dragItem.setDraggingFrame(NSRect(origin: convert(event.locationInWindow, from: nil), size: NSSize(width: 40, height: 40)),
+                                      contents: NSWorkspace.shared.icon(forFile: url.path))
+            exporting = true; startedDrag()
+            beginDraggingSession(with: [dragItem], event: event, source: self)
+        } catch { reportError(error.localizedDescription); endGesture() }
+    }
+    override func mouseUp(with event: NSEvent) {
+        guard downPoint != nil, !exporting else { return }
+        let shouldOpen = !gesture.reordered && bounds.contains(convert(event.locationInWindow, from: nil))
+        endGesture()
+        if shouldOpen { activate() }
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .outsideApplication ? .copy : .move
+    }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { endGesture() }
+    private func endGesture() {
+        gesture.end()
+        downPoint = nil; exporting = false
+    }
+}
+
+private struct DeckCardInteraction: NSViewRepresentable {
+    let note: Note
+    let gesture: HeldCardGesture
+    let activate: () -> Void
+    let hover: (Bool) -> Void
+    let holding: (Bool) -> Void
+    let reorder: (Int) -> Void
+    let startedDrag: () -> Void
+    let error: (String) -> Void
+    func makeNSView(context: Context) -> DeckCardInteractionView { let view = DeckCardInteractionView(); updateNSView(view, context: context); return view }
+    func updateNSView(_ view: DeckCardInteractionView, context: Context) {
+        view.note = note; view.gesture = gesture; view.activate = activate; view.hover = hover; view.holding = holding
+        view.reorder = reorder; view.startedDrag = startedDrag; view.reportError = error
+    }
 }
 
 private struct ChecklistPreviewLine: View {
@@ -319,16 +453,18 @@ struct EdgeDeckView: View {
     @State private var plusHovered = false
 
     var body: some View {
-        ZStack(alignment: settings.side == .bottom ? .bottom : (settings.side == .right ? .trailing : .leading)) {
+        ZStack(alignment: model.side == .bottom ? .bottom : (model.side == .right ? .trailing : .leading)) {
             Color.clear
-            if settings.side == .bottom {
+            if store.active.isEmpty {
+                deckAddButton.contextMenu { deckMenu }
+            } else if model.side == .bottom {
                 if model.expanded || settings.keepOpen { bottomFan } else { bottomPill }
             } else if model.expanded || settings.keepOpen {
                 fan
             } else {
                 pill
             }
-            if let undo = store.undoNote {
+            if let undo = store.undoNote, !store.active.isEmpty {
                 HStack(spacing: 8) {
                     Text("\(undo.title) deleted").lineLimit(1)
                     Button("Undo") { store.undoDelete() }.buttonStyle(.borderless).fontWeight(.semibold)
@@ -362,7 +498,6 @@ struct EdgeDeckView: View {
         HStack(alignment: .bottom, spacing: 0) {
             ForEach(Array(store.active.prefix(model.noteLimit).enumerated()), id: \.element.id) { index, note in
                 bottomSlot(note, index: index)
-                    .onDrag { noteDragProvider(note) }
                     .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
             }
         }
@@ -385,9 +520,8 @@ struct EdgeDeckView: View {
                 if lifted {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                        ForEach(Array(current.body.components(separatedBy: "\n").prefix(4).enumerated()), id: \.offset) { _, line in
-                            ChecklistPreviewLine(line: line, font: settings.nsNoteFont).lineLimit(1)
-                        }
+                        Text(settings.markdownEnabled ? NoteMarkdown.preview(current.body, font: settings.nsNoteFont) : AttributedString(current.body))
+                            .lineLimit(4)
                         Spacer(minLength: 0)
                     }
                     .font(settings.noteFont).foregroundStyle(.black.opacity(0.72))
@@ -408,17 +542,8 @@ struct EdgeDeckView: View {
         .offset(y: lifted ? -8 : 0)
         .frame(width: DeckCardMetrics.bottomStep, height: 210, alignment: .bottom)
         .overlay(alignment: .bottom) {
-            Color.clear
-                .contentShape(Rectangle())
+            cardInteraction(note, lifted: lifted)
                 .frame(width: lifted ? DeckCardMetrics.contentWidth : DeckCardMetrics.bottomStep, height: 210)
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active where settings.fanMode == .hover && DeckHoverGate.isReady(now: ProcessInfo.processInfo.systemUptime, readyAt: hoverReadyAt): hovered = note.id
-                    case .ended where settings.fanMode == .hover && hovered == note.id: hovered = nil
-                    default: break
-                    }
-                }
-                .onTapGesture { activate(note, lifted: lifted) }
             }
         .contextMenu { noteMenu(current) }
         .zIndex(lifted ? 20 : Double(index))
@@ -453,19 +578,18 @@ struct EdgeDeckView: View {
                 .accessibilityLabel("Show Margin deck")
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: settings.side == .right ? .trailing : .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: model.side == .right ? .trailing : .leading)
     }
 
     private var fan: some View {
         let notes = Array(store.active.prefix(model.noteLimit))
         let hoveredIndex = notes.firstIndex { $0.id == hovered }
-        let edge: Alignment = settings.side == .right ? .trailing : .leading
+        let edge: Alignment = model.side == .right ? .trailing : .leading
         return ZStack(alignment: edge) {
             VStack(spacing: DeckCardMetrics.spacing) {
                 ForEach(Array(notes.enumerated()), id: \.element.id) { index, note in
                     deckCard(note, index: index)
-                        .onDrag { noteDragProvider(note) }
-                        .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
+                            .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
                         .offset(y: DeckCardMetrics.spreadOffset(index: index, hoveredIndex: hoveredIndex))
                         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
                 }
@@ -496,7 +620,7 @@ struct EdgeDeckView: View {
             if store.active.count > model.noteLimit {
                 Button("+\(store.active.count - model.noteLimit) more") { showAll() }
                     .buttonStyle(.borderless).fixedSize()
-                    .offset(x: settings.side == .bottom ? 0 : (settings.side == .left ? 60 : -60), y: settings.side == .bottom ? -24 : 0)
+                    .offset(x: model.side == .bottom ? 0 : (model.side == .left ? 60 : -60), y: model.side == .bottom ? -24 : 0)
                     .help("Show all notes")
             }
         }
@@ -527,14 +651,14 @@ struct EdgeDeckView: View {
         let activeOffset = lifted ? DeckCardMetrics.liftedOffset : DeckCardMetrics.tuckedOffset(index: index)
         let offset = reduceMotion || model.fanVisible ? activeOffset : DeckCardMetrics.hiddenOffset
         let isLast = index == min(store.active.count, model.noteLimit) - 1
-        let edge: Alignment = settings.side == .right ? .trailing : .leading
+        let edge: Alignment = model.side == .right ? .trailing : .leading
         return Button { activate(note, lifted: lifted) } label: {
             ZStack(alignment: edge) {
                 HStack(spacing: 0) {
-                if settings.side == .right { tabLabel(current.title) }
+                if model.side == .right { tabLabel(current.title) }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
-                        if settings.side == .right {
+                        if model.side == .right {
                             Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                             Spacer(minLength: 0)
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
@@ -545,24 +669,22 @@ struct EdgeDeckView: View {
                         }
                     }
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(current.body.components(separatedBy: "\n").prefix(3).enumerated()), id: \.offset) { _, line in
-                            ChecklistPreviewLine(line: line, font: settings.nsNoteFont).lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+                        Text(settings.markdownEnabled ? NoteMarkdown.preview(current.body, font: settings.nsNoteFont) : AttributedString(current.body))
+                            .lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(settings.noteFont).foregroundStyle(.black.opacity(0.72))
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 12).padding(.vertical, 11)
                 .frame(width: DeckCardMetrics.contentWidth, height: DeckCardMetrics.height, alignment: .topLeading)
-                if settings.side == .left { tabLabel(current.title) }
+                if model.side == .left { tabLabel(current.title) }
             }
             .frame(width: DeckCardMetrics.width, height: DeckCardMetrics.height)
             .foregroundStyle(.black.opacity(0.73))
             .background(current.color.color, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .modifier(CardShadow(lifted: lifted))
-            .rotationEffect(.degrees(settings.side == .right ? -2.2 : 2.2))
-            .offset(x: settings.side == .right ? offset : -offset)
+            .rotationEffect(.degrees(model.side == .right ? -2.2 : 2.2))
+            .offset(x: model.side == .right ? offset : -offset)
             .opacity(model.fanVisible ? 1 : (reduceMotion ? 0 : 1))
                 .animation(reduceMotion ? nil : .timingCurve(0.20, 1.05, 0.30, 1.00, duration: settings.cardDuration), value: lifted)
                 .animation(reduceMotion ? nil : .timingCurve(0.20, 1.08, 0.30, 1.00, duration: settings.fanDuration).delay(Double(index) * 0.03 * settings.animationScale), value: model.fanVisible)
@@ -570,21 +692,10 @@ struct EdgeDeckView: View {
         }
         .buttonStyle(.plain)
         .frame(width: DeckCardMetrics.visibleWidth, height: DeckCardMetrics.height, alignment: edge)
-        .overlay(alignment: settings.side == .right ? .topTrailing : .topLeading) {
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(
-                    width: DeckCardMetrics.hoverWidth(lifted: lifted, index: index),
-                    height: DeckCardMetrics.hoverHeight(lifted: lifted, isLast: isLast)
-                )
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active where settings.fanMode == .hover && DeckHoverGate.isReady(now: ProcessInfo.processInfo.systemUptime, readyAt: hoverReadyAt): hovered = note.id
-                    case .ended where settings.fanMode == .hover && hovered == note.id: hovered = nil
-                    default: break
-                    }
-                }
-                .onTapGesture { activate(note, lifted: lifted) }
+        .overlay(alignment: model.side == .right ? .topTrailing : .topLeading) {
+            cardInteraction(note, lifted: lifted)
+                .frame(width: DeckCardMetrics.hoverWidth(lifted: lifted, index: index),
+                       height: DeckCardMetrics.hoverHeight(lifted: lifted, isLast: isLast))
         }
         .zIndex(Double(index))
         .contextMenu { noteMenu(current) }
@@ -597,15 +708,18 @@ struct EdgeDeckView: View {
         else { hovered = note.id }
     }
 
-    private func noteDragProvider(_ note: Note) -> NSItemProvider {
-        do {
-            let provider = try NoteFile(note: store.note(note.id) ?? note).itemProvider()
-            dragging = note.id
-            return provider
-        } catch {
-            store.errorMessage = error.localizedDescription
-            return NSItemProvider()
-        }
+    private func cardInteraction(_ note: Note, lifted: Bool) -> some View {
+        DeckCardInteraction(note: store.note(note.id) ?? note, gesture: model.cardGesture,
+            activate: { activate(note, lifted: lifted) },
+            hover: { inside in
+                guard model.reorderingNote == nil else { return }
+                if inside && settings.fanMode == .hover && DeckHoverGate.isReady(now: ProcessInfo.processInfo.systemUptime, readyAt: hoverReadyAt) { hovered = note.id }
+                if !inside && settings.fanMode == .hover && hovered == note.id { hovered = nil }
+            },
+            holding: { model.reorderingNote = $0 ? note.id : nil },
+            reorder: { store.move(note.id, by: $0) },
+            startedDrag: { dragging = note.id },
+            error: { store.errorMessage = $0 })
     }
 
     private func tabLabel(_ title: String) -> some View {
@@ -613,10 +727,10 @@ struct EdgeDeckView: View {
             .font(.system(size: 9, weight: .semibold)).foregroundStyle(.black.opacity(0.58))
             .lineLimit(1).truncationMode(.tail)
             .frame(width: DeckCardMetrics.height - 28)
-            .rotationEffect(.degrees(settings.side == .right ? -90 : 90))
+            .rotationEffect(.degrees(model.side == .right ? -90 : 90))
             .frame(width: DeckCardMetrics.tabWidth, height: DeckCardMetrics.height - 20)
             .padding(.top, 10).frame(width: DeckCardMetrics.tabWidth, height: DeckCardMetrics.height, alignment: .top)
-            .overlay(alignment: settings.side == .right ? .trailing : .leading) {
+            .overlay(alignment: model.side == .right ? .trailing : .leading) {
                 Path { path in path.move(to: .zero); path.addLine(to: CGPoint(x: 0, y: DeckCardMetrics.height - 24)) }
                     .stroke(.black.opacity(0.16), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
                     .frame(width: 1, height: DeckCardMetrics.height - 24).padding(.vertical, 12)
@@ -634,9 +748,9 @@ struct EdgeDeckView: View {
         }
         Button { if let copy = store.duplicate(note.id) { open(copy.id) } } label: { Label("Duplicate", systemImage: "doc.on.doc") }
         Menu {
-            Button { settings.side = .left } label: { Label("Left", systemImage: "rectangle.lefthalf.inset.filled") }
-            Button { settings.side = .right } label: { Label("Right", systemImage: "rectangle.righthalf.inset.filled") }
-            Button { settings.side = .bottom } label: { Label("Bottom", systemImage: "rectangle.bottomhalf.inset.filled") }
+            Button { model.side = .left } label: { Label("Left", systemImage: "rectangle.lefthalf.inset.filled") }
+            Button { model.side = .right } label: { Label("Right", systemImage: "rectangle.righthalf.inset.filled") }
+            Button { model.side = .bottom } label: { Label("Bottom", systemImage: "rectangle.bottomhalf.inset.filled") }
         } label: { Label("Screen Side", systemImage: "rectangle.split.3x1") }
         Divider()
         Button(action: showAll) { Label("All Notes…", systemImage: "square.grid.2x2") }
@@ -654,9 +768,9 @@ struct EdgeDeckView: View {
         Button(action: showSettings) { Label("Settings…", systemImage: "gearshape") }
         Divider()
         Menu("Screen Side") {
-            Button("Left") { settings.side = .left }
-            Button("Right") { settings.side = .right }
-            Button("Bottom") { settings.side = .bottom }
+            Button("Left") { model.side = .left }
+            Button("Right") { model.side = .right }
+            Button("Bottom") { model.side = .bottom }
         }
         Menu("Font") {
             ForEach(noteFontNames, id: \.self) { value in
@@ -721,12 +835,73 @@ final class ChecklistNSTextView: NSTextView {
     var noteFont: NSFont = .systemFont(ofSize: 21)
     var markdownEnabled = true
     private var codeRanges: [NSRange] = []
+    var previewDelay: Double = 5
+    private(set) var isPreview = true
+    private var previewTimer: Timer?
+    private var pointerTracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTracking { removeTrackingArea(pointerTracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area); pointerTracking = area
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        showPreview()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { showPreview() }
+        return resigned
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        enclosingScrollView?.scrollWheel(with: event)
+    }
+
+    deinit { previewTimer?.invalidate() }
+
+    func beginSourceEditing() {
+        if markdownEnabled && isPreview {
+            isPreview = false
+            applyStyle()
+        }
+        schedulePreview()
+    }
+
+    private func schedulePreview() {
+        previewTimer?.invalidate()
+        guard markdownEnabled, !isPreview, window != nil else { return }
+        let timer = Timer(timeInterval: previewDelay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if self.hasMarkedText() || self.selectedRange().length > 0 || NSEvent.pressedMouseButtons != 0 {
+                self.schedulePreview()
+            } else { self.showPreview() }
+        }
+        previewTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func showPreview() {
+        previewTimer?.invalidate(); previewTimer = nil
+        guard markdownEnabled, !hasMarkedText() else { return }
+        isPreview = true
+        applyStyle()
+        needsDisplay = true
+    }
+
 
     override func didChangeText() {
-        super.didChangeText(); applyStyle(); changed?(string); needsDisplay = true
+        super.didChangeText()
+        if markdownEnabled { beginSourceEditing() } else { applyStyle() }
+        changed?(string); needsDisplay = true
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        beginSourceEditing()
         let value = (insertString as? NSAttributedString)?.string ?? insertString as? String
         let range = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
         if value == "]", range.length == 0,
@@ -771,6 +946,14 @@ final class ChecklistNSTextView: NSTextView {
         ]
         storage.beginEditing()
         storage.setAttributes(normalTypingAttributes, range: NSRange(location: 0, length: storage.length))
+        if markdownEnabled && !isPreview {
+            codeRanges = []
+            storage.endEditing(); selectedRanges = selection
+            typingAttributes = normalTypingAttributes
+            insertionPointColor = NSColor.black.withAlphaComponent(0.76)
+            needsDisplay = true
+            return
+        }
         codeRanges = markdownEnabled ? NoteMarkdown.apply(to: storage, font: noteFont) : []
         (string as NSString).enumerateSubstrings(in: NSRange(location: 0, length: (string as NSString).length), options: [.byLines, .substringNotRequired]) { _, range, _, _ in
             guard !self.codeRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }) else { return }
@@ -815,7 +998,8 @@ final class ChecklistNSTextView: NSTextView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        guard window != nil else { previewTimer?.invalidate(); return }
+        isPreview = true
         applyStyle()
         if let textContainer { layoutManager?.ensureLayout(for: textContainer) }
         needsDisplay = true
@@ -827,6 +1011,7 @@ final class ChecklistNSTextView: NSTextView {
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting stillSelectingFlag: Bool) {
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelectingFlag)
+        if !isPreview { schedulePreview() }
         needsDisplay = true
     }
 
@@ -859,6 +1044,7 @@ final class ChecklistNSTextView: NSTextView {
     var checklistIndent: CGFloat { ChecklistMarkGeometry.boxSize(font: noteFont) + 8 }
 
     func checkboxRect(at character: Int) -> NSRect? {
+        guard !markdownEnabled || isPreview else { return nil }
         guard !codeRanges.contains(where: { NSLocationInRange(character, $0) }) else { return nil }
         guard let layoutManager, let textContainer, character < (string as NSString).length else { return nil }
         layoutManager.ensureLayout(for: textContainer)
@@ -872,6 +1058,7 @@ final class ChecklistNSTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        guard !markdownEnabled || isPreview else { return }
         let ns = string as NSString
         ns.enumerateSubstrings(in: NSRange(location: 0, length: ns.length), options: [.byLines, .substringNotRequired]) { _, range, _, _ in
             guard range.length >= 6 else { return }
@@ -918,12 +1105,27 @@ final class ChecklistNSTextView: NSTextView {
                 return
             }
         }
+        if markdownEnabled && isPreview {
+            let cursor = characterIndexForInsertion(at: point)
+            beginSourceEditing()
+            window?.makeFirstResponder(self)
+            setSelectedRange(NSRange(location: min(cursor, (string as NSString).length), length: 0))
+            return
+        }
+        beginSourceEditing()
         super.mouseDown(with: event)
+        schedulePreview()
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        guard !markdownEnabled || !isPreview else { return }
+        super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
     }
 
     override func cancelOperation(_ sender: Any?) { cancelled?() }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { cancelled?(); return }
+        beginSourceEditing()
         super.keyDown(with: event)
     }
 }
@@ -950,14 +1152,20 @@ struct ChecklistTextEditor: NSViewRepresentable {
     @Binding var text: String
     let font: NSFont
     var markdownEnabled = true
+    var previewDelay: Double = 5
     let cancel: () -> Void
     let handle: ChecklistEditorHandle
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false; scroll.scrollerStyle = .overlay; scroll.autohidesScrollers = true; scroll.verticalScroller?.controlSize = .small
         let view = ChecklistNSTextView(); view.drawsBackground = false; view.isRichText = false; view.allowsUndo = true; view.usesFindPanel = true; view.isIncrementalSearchingEnabled = true; view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
+        view.isContinuousSpellCheckingEnabled = true; view.isGrammarCheckingEnabled = true
+        view.isAutomaticSpellingCorrectionEnabled = true
+        view.minSize = .zero; view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        view.isHorizontallyResizable = false
+        view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         view.focusRingType = .none; view.textContainerInset = NSSize(width: 0, height: 8); view.textContainer?.widthTracksTextView = true; view.isVerticallyResizable = true; view.autoresizingMask = [.width]
-        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.string = text; view.applyStyle(); view.cancelled = cancel; view.changed = { value in if value != text { text = value } }
+        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.previewDelay = previewDelay; view.string = text; view.applyStyle(); view.cancelled = cancel; view.changed = { value in if value != text { text = value } }
         handle.view = view
         scroll.documentView = view
         view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
@@ -970,8 +1178,9 @@ struct ChecklistTextEditor: NSViewRepresentable {
         let fontChanged = view.noteFont.fontName != font.fontName || view.noteFont.pointSize != font.pointSize
         let textChanged = view.string != text
         let markdownChanged = view.markdownEnabled != markdownEnabled
-        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.cancelled = cancel
+        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.previewDelay = previewDelay; view.cancelled = cancel
         if textChanged { view.string = text }
+        if markdownChanged && markdownEnabled { view.showPreview() }
         if textChanged || fontChanged || markdownChanged { view.applyStyle(); view.needsDisplay = true }
     }
 }
@@ -1025,7 +1234,7 @@ struct NoteEditorView: View {
             }
             .padding(.horizontal, 16).frame(height: 47)
             Divider().opacity(0.22).padding(.horizontal, 16)
-            ChecklistTextEditor(text: $note.body, font: settings.nsNoteFont, markdownEnabled: settings.markdownEnabled, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
+            ChecklistTextEditor(text: $note.body, font: settings.nsNoteFont, markdownEnabled: settings.markdownEnabled, previewDelay: settings.markdownPreviewDelay, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
             Divider().opacity(0.2)
             HStack(spacing: 8) {
                 ForEach(NoteColor.allCases, id: \.rawValue) { value in
@@ -1413,7 +1622,35 @@ enum ExportController {
     }
 }
 
-private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", cloud = "Cloud Sync", shortcuts = "Keyboard", system = "System", appearance = "Appearance", about = "About" }
+private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", appearance = "Appearance", shortcuts = "Keyboard", system = "System", cloud = "Cloud Sync", about = "About" }
+
+enum SettingsPalette {
+    static func color(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
+    static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { color($0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light) })
+    }
+    static let surface = adaptive(0xF3F1EC, 0x23231F)
+    static let shell = adaptive(0xE5E2DA, 0x34342F)
+    static let well = adaptive(0xE8E5DD, 0x191A17)
+    static let ink = adaptive(0x292824, 0xF1EEE5)
+    static let secondary = adaptive(0x65625B, 0xB8B4A9)
+    static func font(_ size: CGFloat, medium: Bool = false) -> Font { .custom(medium ? "Satoshi-Medium" : "Satoshi-Regular", size: size) }
+}
+
+extension InterfaceColor {
+    func nsColor(isDark: Bool) -> NSColor {
+        let pair: (UInt32, UInt32) = switch self {
+        case .clay: (0x995039, 0xE1A48B)
+        case .olive: (0x536245, 0xB2C29D)
+        case .slate: (0x4C657B, 0xA5C1D8)
+        case .plum: (0x755675, 0xD2ACD3)
+        case .graphite: (0x65615A, 0xCEC7BA)
+        }
+        return SettingsPalette.color(isDark ? pair.1 : pair.0)
+    }
+}
 
 extension Notification.Name {
     static let marginShortcutRecording = Notification.Name("MarginShortcutRecording")
@@ -1432,7 +1669,8 @@ private final class ShortcutRecorderButton: NSButton {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        bezelStyle = .rounded; target = self; action = #selector(beginRecording); title = shortcut.display
+        isBordered = false; font = NSFont(name: "Satoshi-Medium", size: 12)
+        target = self; action = #selector(beginRecording); title = shortcut.display
         toolTip = "Click, then press a shortcut"
     }
 
@@ -1501,180 +1739,240 @@ private struct ShortcutRecorder: NSViewRepresentable {
     func updateNSView(_ view: ShortcutRecorderButton, context: Context) { view.shortcut = shortcut; view.changed = changed }
 }
 
-private struct AccentSegmentedPicker<Value: Hashable>: NSViewRepresentable {
+private struct AccentSegmentedPicker<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(value: Value, label: String)]
     let accessibilityLabel: String
+    var accent: NSColor = MarginPalette.accent
 
-    func makeNSView(context: Context) -> NSSegmentedControl {
-        let control = NSSegmentedControl(
-            labels: options.map(\.label), trackingMode: .selectOne,
-            target: context.coordinator, action: #selector(Coordinator.changed(_:))
-        )
-        control.segmentDistribution = .fill
-        control.selectedSegmentBezelColor = MarginPalette.accent
-        control.setAccessibilityLabel(accessibilityLabel)
-        updateNSView(control, context: context)
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.value) { option in
+                Button { selection = option.value } label: {
+                    Text(option.label).font(SettingsPalette.font(12, medium: selection == option.value))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .foregroundStyle(selection == option.value ? Color(nsColor: accent) : SettingsPalette.secondary)
+                        .background(selection == option.value ? SettingsPalette.surface : .clear, in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .accessibilityLabel("\(accessibilityLabel): \(option.label)")
+                    .accessibilityValue(selection == option.value ? "Selected" : "Not selected")
+            }
+        }
+        .padding(3).background(SettingsPalette.well, in: RoundedRectangle(cornerRadius: 9))
+    }
+}
+
+private struct SettingsMenu<Value: Hashable>: NSViewRepresentable {
+    let title: String
+    @Binding var selection: Value
+    let options: [(Value, String)]
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let control = NSPopUpButton(frame: .zero, pullsDown: false)
+        control.isBordered = false; control.alignment = .left
+        (control.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        control.font = NSFont(name: "Satoshi-Regular", size: 12)
+        control.target = context.coordinator; control.action = #selector(Coordinator.changed(_:))
+        control.setAccessibilityLabel(title)
         return control
     }
 
-    func updateNSView(_ control: NSSegmentedControl, context: Context) {
-        context.coordinator.selection = $selection
-        context.coordinator.values = options.map(\.value)
-        control.selectedSegment = options.firstIndex { $0.value == selection } ?? -1
-        control.selectedSegmentBezelColor = MarginPalette.accent
-        for (index, option) in options.enumerated() { control.setLabel(option.label, forSegment: index) }
+    func updateNSView(_ control: NSPopUpButton, context: Context) {
+        context.coordinator.selection = $selection; context.coordinator.values = options.map(\.0)
+        if control.itemTitles != options.map(\.1) { control.removeAllItems(); control.addItems(withTitles: options.map(\.1)) }
+        control.selectItem(at: options.firstIndex { $0.0 == selection } ?? -1)
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(selection: $selection, values: options.map(\.value))
-    }
-
+    func makeCoordinator() -> Coordinator { Coordinator(selection: $selection) }
     final class Coordinator: NSObject {
         var selection: Binding<Value>
-        var values: [Value]
-
-        init(selection: Binding<Value>, values: [Value]) {
-            self.selection = selection
-            self.values = values
-        }
-
-        @objc func changed(_ sender: NSSegmentedControl) {
-            guard values.indices.contains(sender.selectedSegment) else { return }
-            selection.wrappedValue = values[sender.selectedSegment]
+        var values: [Value] = []
+        init(selection: Binding<Value>) { self.selection = selection }
+        @objc func changed(_ control: NSPopUpButton) {
+            guard values.indices.contains(control.indexOfSelectedItem) else { return }
+            selection.wrappedValue = values[control.indexOfSelectedItem]
         }
     }
 }
 
+private struct SettingsButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(SettingsPalette.font(12, medium: true)).padding(.horizontal, 12).frame(height: 30)
+            .background(SettingsPalette.well, in: RoundedRectangle(cornerRadius: 8)).opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+private struct SettingsNoteBody: NSViewRepresentable {
+    let text: String
+    let font: NSFont
+    let markdownEnabled: Bool
+
+    func makeNSView(context: Context) -> ChecklistNSTextView {
+        let view = ChecklistNSTextView()
+        view.drawsBackground = false; view.isEditable = false; view.isSelectable = false
+        view.textContainerInset = NSSize(width: 0, height: 8)
+        view.textContainer?.lineFragmentPadding = 5
+        view.textContainer?.widthTracksTextView = true
+        return view
+    }
+
+    func updateNSView(_ view: ChecklistNSTextView, context: Context) {
+        view.string = text; view.noteFont = font; view.markdownEnabled = markdownEnabled
+        view.applyStyle(); view.needsDisplay = true
+    }
+}
+
 struct SettingsView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var settings: AppSettings
+    @ObservedObject var store: NotesStore
     @ObservedObject var cloudSync: CloudSyncController
     let updater: SPUUpdater
-    @State private var tab = SettingsTab.general
+    @State private var tab = SettingsTab.appearance
+    @State private var previewIndex = 0
     @State private var screens = NSScreen.screens
 
     static func visibleVersion(shortVersion: String) -> String { shortVersion }
 
+    private var surface: Color { SettingsPalette.surface }
+    private var secondaryInk: Color { SettingsPalette.secondary }
+    private var accent: Color { Color(nsColor: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)) }
+    private var rule: Color { SettingsPalette.ink.opacity(contrast == .increased ? 0.55 : 0.10) }
+    private var displayOptions: [(String, String)] {
+        var options = [("main", "Main display"), ("all", "All displays")] + screens.map { ($0.displayID, $0.localizedName) }
+        if !options.contains(where: { $0.0 == settings.display }) { options.append((settings.display, "Disconnected display")) }
+        return options
+    }
+
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                sidebarHeading("Settings")
-                tabButton(.general, "slider.horizontal.3")
-                tabButton(.notes, "note.text")
-                tabButton(.cloud, "icloud").disabled(true).opacity(0.4).help("Cloud Sync is coming later")
-                tabButton(.shortcuts, "command")
-                tabButton(.system, "laptopcomputer")
-                tabButton(.appearance, "paintpalette")
-                Divider().opacity(0.4).padding(.vertical, 10)
-                sidebarHeading("Info")
-                tabButton(.about, "info.circle")
+        VStack(spacing: 0) {
+            HStack {
+                Color.clear.frame(width: 90, height: 1)
                 Spacer()
-                Text("Margin \(versionText)").font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 10)
+                Text("margin").font(SettingsPalette.font(20, medium: true)).tracking(-0.7)
+                Spacer()
+                Text("Settings").font(SettingsPalette.font(11)).foregroundStyle(secondaryInk).frame(width: 90, alignment: .trailing)
+            }.padding(.horizontal, 24).frame(height: 54)
+            HStack(spacing: 28) {
+                ForEach(SettingsTab.allCases, id: \.self) { value in tabButton(value) }
             }
-            .padding(18).frame(width: 196, alignment: .leading).background(appSidebar)
-            Divider().opacity(0.45)
-            ScrollView { Group { switch tab { case .general: general; case .notes: notes; case .cloud: cloud; case .shortcuts: shortcuts; case .system: system; case .appearance: appearance; case .about: about } }.padding(.horizontal, 40).padding(.vertical, 34).frame(maxWidth: .infinity, alignment: .leading) }
-                .background(Color(nsColor: .textBackgroundColor))
+            .frame(maxWidth: .infinity).padding(.horizontal, 20)
+            .overlay(alignment: .bottom) { rule.frame(height: 1) }.padding(.horizontal, 25)
+                VStack(spacing: 18) {
+                    Group {
+                        switch tab {
+                        case .general: general
+                        case .notes: notes
+                        case .cloud: cloud
+                        case .shortcuts: shortcuts
+                        case .system: system
+                        case .appearance: appearance
+                        case .about: about
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .top).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    HStack {
+                        Text("Margin \(versionText)")
+                        Spacer()
+                        Text("Changes save automatically.")
+                    }
+                    .font(SettingsPalette.font(10)).foregroundStyle(secondaryInk)
+                    .padding(.top, 12).overlay(alignment: .top) { rule.frame(height: 1) }
+                }
+                .frame(maxWidth: 760).padding(.horizontal, 40).padding(.top, 22).padding(.bottom, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .tint(appAccent)
+        .font(SettingsPalette.font(13)).foregroundStyle(SettingsPalette.ink)
+        .tint(accent).background(surface).ignoresSafeArea(.container, edges: .top)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in screens = NSScreen.screens }
     }
 
-    private func sidebarHeading(_ title: String) -> some View { Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).tracking(0.9).foregroundStyle(.secondary).padding(.horizontal, 10).padding(.bottom, 5) }
-
-    private func tabButton(_ value: SettingsTab, _ icon: String) -> some View {
-        let isSelected = tab == value
-        return Button { tab = value } label: {
-            HStack(spacing: 9) {
-                Image(systemName: icon).font(.system(size: 13, weight: .medium)).frame(width: 18)
-                Text(value.rawValue).font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                Spacer(minLength: 0)
-            }
-                .foregroundStyle(isSelected ? appAccent : .primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10).frame(height: 36)
-                .background(isSelected ? appSelectionSurface : .clear, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(isSelected ? appSelectionBorder : .clear, lineWidth: 1))
+    private func tabButton(_ value: SettingsTab) -> some View {
+        Button { tab = value } label: {
+            Text(value.rawValue).font(SettingsPalette.font(12, medium: tab == value))
+                .foregroundStyle(tab == value ? SettingsPalette.ink : secondaryInk)
+                .padding(.top, 8).padding(.bottom, 17)
+                .overlay(alignment: .bottom) { Rectangle().fill(tab == value ? accent : .clear).frame(height: 2) }
+                .contentShape(Rectangle())
         }
-        .buttonStyle(HoverButtonStyle())
-        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .buttonStyle(.plain).disabled(value == .cloud).opacity(value == .cloud ? 0.4 : 1)
+        .help(value == .cloud ? "Cloud Sync is coming later" : value.rawValue)
+        .accessibilityValue(tab == value ? "Selected" : "Not selected")
     }
 
     private var general: some View {
         VStack(alignment: .leading, spacing: 22) {
             heading("General", "How the deck looks and behaves.")
             settingsSection("Deck") {
-                settingRow("Screen side", "Which edge the deck lives on") { AccentSegmentedPicker(selection: $settings.side, options: [(.left, "Left"), (.right, "Right"), (.bottom, "Bottom")], accessibilityLabel: "Screen side").frame(width: 190, height: 28) }
-                settingRow("Fan notes", "Hovering always fans the deck; this is what opens a card") { AccentSegmentedPicker(selection: $settings.fanMode, options: [(.hover, "On hover"), (.click, "On click")], accessibilityLabel: "Fan notes").frame(width: 160, height: 28) }
-                settingRow("Keep the deck open", "The deck stays at the edge instead of resting as the dots") { Toggle("Keep the deck open", isOn: $settings.keepOpen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
+                settingRow("Screen side", "Which edge the deck lives on") { AccentSegmentedPicker(selection: $settings.side, options: [(.left, "Left"), (.right, "Right"), (.bottom, "Bottom")], accessibilityLabel: "Screen side", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
+                settingRow("Open a note", "Choose how to open a card in the deck") { AccentSegmentedPicker(selection: $settings.fanMode, options: [(.hover, "On hover"), (.click, "On click")], accessibilityLabel: "Open a note", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
+                settingRow("Keep the deck open", "Leave the cards visible at the screen edge") { Toggle("Keep the deck open", isOn: $settings.keepOpen).toggleStyle(.switch).labelsHidden().tint(accent) }
                 settingRow("Activation delay", "Wait before opening the deck on hover") {
                     HStack(spacing: 8) {
-                        Slider(value: $settings.activationDelay, in: 0...1).frame(width: 130).accessibilityLabel("Activation delay")
+                        Slider(value: $settings.activationDelay, in: 0...1).frame(width: 140).accessibilityLabel("Activation delay")
                         Text("\(Int((settings.activationDelay * 1000).rounded())) ms").monospacedDigit().frame(width: 55, alignment: .trailing)
                     }
                 }
                 settingRow("Display", "Choose a display, or show the deck on all of them") {
-                    Picker("Display", selection: $settings.display) {
-                        Text("All displays").tag("all")
-                        Text("Main display").tag("main")
-                        ForEach(screens, id: \.displayID) { screen in Text(screen.localizedName).tag(screen.displayID) }
-                        if settings.display != "all", settings.display != "main", !screens.contains(where: { $0.displayID == settings.display }) {
-                            Text("Disconnected display (using main)").tag(settings.display)
-                        }
-                    }.labelsHidden().frame(width: 190)
+                    settingsMenu("Display", selection: $settings.display, options: displayOptions, width: 200)
                 }
-                settingRow("Animation speed", "How briskly the deck moves", divider: false) { AccentSegmentedPicker(selection: $settings.animationSpeed, options: [(.fast, "Fast"), (.normal, "Normal"), (.slow, "Slow")], accessibilityLabel: "Animation speed").frame(width: 195, height: 28) }
+                settingRow("Animation speed", "How briskly the deck moves", divider: false) { AccentSegmentedPicker(selection: $settings.animationSpeed, options: [(.fast, "Fast"), (.normal, "Normal"), (.slow, "Slow")], accessibilityLabel: "Animation speed", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
             }
         }
     }
 
     private var notes: some View {
         VStack(alignment: .leading, spacing: 22) {
-            heading("Notes", "Choose how your notes look.")
-            settingsSection("Writing") {
-                settingRow("Handwriting", "The face your notes are written in") { Picker("", selection: $settings.fontName) { ForEach(noteFontNames, id: \.self) { Text($0).font(.custom($0, size: 14)) } }.frame(width: 160) }
-                settingRow("Text size", "Body text in notes", divider: false) { Picker("", selection: $settings.textSize) { ForEach([10.0, 12.0, 14.0, 16.0, 18.0, 21.0, 24.0, 28.0], id: \.self) { Text("\(Int($0)) pt").tag($0) } }.frame(width: 90) }
-            }
+            heading("Notes", "Writing, formatting, and sharing.")
             settingsSection("Markdown & sharing") {
                 settingRow("Markdown formatting", "Use headings, emphasis, lists, links and code in notes") {
                     Toggle("Markdown formatting", isOn: $settings.markdownEnabled).toggleStyle(.switch).labelsHidden()
                 }
+                settingRow("Preview after inactivity", "Show formatted Markdown after you stop editing") {
+                    HStack(spacing: 8) {
+                        Slider(value: Binding(get: { settings.markdownPreviewDelay }, set: { settings.markdownPreviewDelay = $0.rounded() }), in: 1...60)
+                            .frame(width: 140).accessibilityLabel("Markdown preview delay")
+                        Text("\(Int(settings.markdownPreviewDelay)) s").monospacedDigit().frame(width: 55, alignment: .trailing)
+                    }.disabled(!settings.markdownEnabled)
+                }
                 settingRow("Show Share button", "Share individual notes as Markdown files", divider: false) {
                     Toggle("Show Share button", isOn: $settings.shareNotes).toggleStyle(.switch).labelsHidden()
-                }
-            }
-            settingsSection("New notes") {
-                settingRow("Default note color", "Otherwise new notes rotate through every color", divider: false) {
-                    HStack(spacing: 7) {
-                        Toggle("Use one default color", isOn: $settings.useDefaultColor).toggleStyle(.switch).labelsHidden().tint(appAccent)
-                        ForEach(NoteColor.allCases, id: \.rawValue) { colorButton($0) }
-                    }
                 }
             }
         }
     }
 
     private var shortcuts: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 16) {
             heading("Keyboard", "Click a shortcut, then press a new key combination. Escape cancels.")
             settingsSection("Shortcuts") {
                 ForEach(KeyboardAction.allCases, id: \.rawValue) { action in
-                    settingRow(action.title, action.isGlobal ? "Works from any app" : "While a Margin window is active", divider: action != .close) {
-                        ShortcutRecorder(shortcut: settings.shortcut(for: action), changed: { settings.setShortcut($0, for: action) })
-                            .frame(width: 145, height: 28).accessibilityLabel(action.title)
-                    }
+                    HStack {
+                        Text(action.title).font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        Text(action.isGlobal ? "Global" : "In Margin").font(SettingsPalette.font(11)).foregroundStyle(secondaryInk)
+                        HStack(spacing: 12) {
+                            ShortcutRecorder(shortcut: settings.shortcut(for: action), changed: { settings.setShortcut($0, for: action) })
+                                .frame(width: 145, height: 30).background(SettingsPalette.well, in: RoundedRectangle(cornerRadius: 8)).accessibilityLabel(action.title)
+                                .disabled(!settings.shortcutEnabled(action)).opacity(settings.shortcutEnabled(action) ? 1 : 0.4)
+                            Toggle("Enable \(action.title)", isOn: Binding(get: { settings.shortcutEnabled(action) }, set: { settings.setShortcutEnabled($0, for: action) }))
+                                .toggleStyle(.switch).labelsHidden()
+                        }
+                    }.frame(height: 39).overlay(alignment: .bottom) { rule.frame(height: action == .close ? 0 : 1) }
                 }
             }
-            settingsSection("Quick capture") {
-                settingRow("Action", "Choose what quick capture opens", divider: false) {
-                    Picker("", selection: $settings.shortcutAction) { ForEach(ShortcutAction.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.frame(width: 155)
-                }
+            settingRow("Quick capture action", "Choose what the quick capture shortcut opens", divider: false) {
+                settingsMenu("Quick capture action", selection: $settings.shortcutAction, options: ShortcutAction.allCases.map { ($0, $0.rawValue) }, width: 200)
             }
             if let error = settings.shortcutError {
                 Label(error, systemImage: "exclamationmark.triangle.fill").font(.system(size: 12)).foregroundStyle(.red)
             }
             Button("Restore default shortcuts") { settings.shortcuts = [:]; settings.shortcutError = nil }
-                .buttonStyle(MatteButtonStyle()).fixedSize()
+                .buttonStyle(SettingsButtonStyle()).fixedSize()
         }
     }
 
@@ -1686,7 +1984,7 @@ struct SettingsView: View {
                     Toggle("Sync my notes", isOn: Binding(
                         get: { settings.cloudSyncEnabled },
                         set: { cloudSync.setEnabled($0) }
-                    )).toggleStyle(.switch).labelsHidden().tint(appAccent)
+                    )).toggleStyle(.switch).labelsHidden().tint(accent)
                 }
                 if settings.cloudSyncEnabled {
                     settingRow("Folder", cloudSync.folderName ?? "Choose where synced notes are stored") {
@@ -1715,33 +2013,175 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 22) {
             heading("System", "Control how Margin behaves on your Mac.")
             settingsSection("Windows") {
-                settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(appAccent) }
-                settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(appAccent) }
-                settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(appAccent) }
+                settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(accent) }
+                settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(accent) }
+                settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(accent) }
             }
         }
     }
 
     private var appearance: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            heading("Appearance", "Choose how Margin looks.")
-            settingsSection("Interface") {
-                settingRow("Theme", "Follow the Mac or choose a fixed appearance", divider: false) {
-                    AccentSegmentedPicker(selection: $settings.appearance, options: [(.light, "Light"), (.system, "System"), (.dark, "Dark")], accessibilityLabel: "Theme").frame(width: 210, height: 28)
-                }
+        VStack(spacing: 20) {
+            heading("Appearance", "The way Margin looks on your Mac.")
+            notePreview
+            HStack(alignment: .top, spacing: 46) {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Theme").font(SettingsPalette.font(13, medium: true))
+                        HStack(spacing: 12) {
+                            ForEach([AppearanceMode.light, .dark, .system], id: \.self) { themeButton($0) }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Interface color").font(SettingsPalette.font(13, medium: true))
+                            Spacer()
+                            Text(settings.interfaceColor.rawValue.capitalized).font(SettingsPalette.font(11)).foregroundStyle(secondaryInk)
+                        }
+                        HStack(spacing: 12) {
+                            ForEach(InterfaceColor.allCases, id: \.self) { value in
+                                swatch(Color(nsColor: value.nsColor(isDark: colorScheme == .dark)), selected: settings.interfaceColor == value,
+                                       label: "\(value.rawValue.capitalized) interface color") { settings.interfaceColor = value }
+                            }
+                        }
+                    }
+                }.frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text("New note color").font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        Text(settings.useDefaultColor ? settings.defaultColor.name : "Cycle palette")
+                            .font(SettingsPalette.font(11)).foregroundStyle(secondaryInk)
+                    }.padding(.bottom, 10)
+                    HStack(spacing: 10) {
+                        Button { settings.useDefaultColor = false } label: {
+                            Circle().fill(AngularGradient(colors: NoteColor.allCases.map(\.color), center: .center))
+                                .overlay(Image(systemName: "arrow.2.circlepath").font(.system(size: 11, weight: .medium)).foregroundStyle(.black.opacity(0.7)))
+                                .frame(width: 23, height: 23).padding(4)
+                                .overlay(Circle().stroke(!settings.useDefaultColor ? accent : .clear, lineWidth: 1.5))
+                                .frame(width: 32, height: 32).contentShape(Circle())
+                        }.buttonStyle(.plain).help("Cycle through the palette for each new note")
+                            .accessibilityLabel("Cycle new note colors").accessibilityValue(!settings.useDefaultColor ? "Selected" : "Not selected")
+                        ForEach(NoteColor.allCases, id: \.rawValue) { value in
+                        swatch(value.color, selected: settings.useDefaultColor && settings.defaultColor == value,
+                               label: "\(value.name) default note color") {
+                            settings.defaultColor = value; settings.useDefaultColor = true
+                        }
+                    } }
+                    Text(settings.useDefaultColor ? "Each new note starts in \(settings.defaultColor.name.lowercased())." : "Each new note gets the next color in the palette.")
+                        .font(SettingsPalette.font(11)).foregroundStyle(secondaryInk).padding(.top, 9)
+                    compactRow("Note typeface") {
+                        settingsMenu("Note typeface", selection: $settings.fontName,
+                                     options: Array(Set(noteFontNames + [settings.fontName])).sorted().map { ($0, $0) }, width: 170)
+                    }
+                    compactRow("Text size") {
+                        settingsMenu("Text size", selection: $settings.textSize,
+                                     options: Array(Set([10.0, 12.0, 14.0, 16.0, 18.0, 21.0, 24.0, 28.0, settings.textSize])).sorted().map { ($0, "\($0.formatted()) pt") }, width: 100)
+                    }
+                }.frame(maxWidth: .infinity)
             }
         }
     }
 
-    private func colorButton(_ value: NoteColor) -> some View {
-        let isSelected = settings.defaultColor == value
-        return Button { settings.defaultColor = value } label: {
-            RoundedRectangle(cornerRadius: 6).fill(value.color).frame(width: 20, height: 20)
-                .overlay { if isSelected { Image(systemName: "checkmark").font(.system(size: 10, weight: .heavy)).foregroundStyle(.black.opacity(0.72)) } }
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? appAccent : .clear, lineWidth: 2.5).padding(-5))
-                .frame(width: 25, height: 25)
-        }.buttonStyle(HoverButtonStyle()).disabled(!settings.useDefaultColor).opacity(settings.useDefaultColor ? 1 : 0.38)
-            .accessibilityLabel("\(value.name) default note color").accessibilityValue(isSelected ? "Selected" : "Not selected")
+    private func themeButton(_ value: AppearanceMode) -> some View {
+        Button { settings.appearance = value } label: {
+            VStack(spacing: 9) {
+                HStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: SettingsPalette.color(value == .dark ? 0x515347 : 0xD7D2C5))).frame(width: 17)
+                    RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: SettingsPalette.color(value == .light ? 0xE6E1D6 : 0x45473D)))
+                        .padding(.bottom, 9)
+                }
+                .padding(7).frame(height: 44)
+                .background {
+                    if value == .system {
+                        HStack(spacing: 0) { Color(nsColor: SettingsPalette.color(0xF8F6F0)); Color(nsColor: SettingsPalette.color(0x34352F)) }
+                    } else { Color(nsColor: SettingsPalette.color(value == .dark ? 0x34352F : 0xF8F6F0)) }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .padding(4).background(SettingsPalette.well, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(settings.appearance == value ? accent : .clear, lineWidth: 1.5))
+                Text(value.rawValue.capitalized).font(SettingsPalette.font(11, medium: settings.appearance == value))
+                    .foregroundStyle(settings.appearance == value ? accent : secondaryInk)
+            }.frame(maxWidth: .infinity).contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel("\(value.rawValue.capitalized) theme")
+            .accessibilityValue(settings.appearance == value ? "Selected" : "Not selected")
+    }
+
+    private func swatch(_ color: Color, selected: Bool, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle().fill(color).frame(width: 23, height: 23)
+                .overlay(Circle().stroke(.black.opacity(0.08)))
+                .padding(4).overlay(Circle().stroke(selected ? accent : .clear, lineWidth: 1.5))
+                .frame(width: 32, height: 32).contentShape(Circle())
+        }.buttonStyle(.plain).accessibilityLabel(label).accessibilityValue(selected ? "Selected" : "Not selected").help(label)
+    }
+
+    private var notePreview: some View {
+        ZStack(alignment: .top) {
+            RadialGradient(colors: [SettingsPalette.shell, SettingsPalette.well], center: .top, startRadius: 5, endRadius: 450)
+            HStack {
+                Text("Live preview · new note style")
+                Spacer()
+                Text("\(previewIndex + 1) / 3").monospacedDigit()
+            }.font(SettingsPalette.font(11)).foregroundStyle(secondaryInk).padding(16)
+            ZStack {
+                ForEach(0..<3) { index in
+                    previewNote(index)
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(.top, 24)
+        }
+        .frame(height: 215).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func previewNote(_ index: Int) -> some View {
+        let selected = previewIndex == index
+        let left = index == (previewIndex + 1) % 3
+        let content = Self.previewContent(notes: store.active, locked: settings.lockNotes, index: index)
+        let noteColor = settings.useDefaultColor ? settings.defaultColor : NoteColor.allCases[(store.nextNoteColor.rawValue + index) % NoteColor.allCases.count]
+        return Button {
+            withAnimation(reduceMotion ? nil : .timingCurve(0.22, 1, 0.36, 1, duration: 0.5)) { previewIndex = index }
+        } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Circle().fill(.black.opacity(0.3)).frame(width: 12, height: 12)
+                    Circle().fill(.black.opacity(0.12)).frame(width: 12, height: 12)
+                    Text(content.title).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                    Spacer()
+                    if settings.shareNotes { Image(systemName: "square.and.arrow.up").font(.system(size: 14)) }
+                    Image(systemName: "pin").font(.system(size: 14))
+                }.padding(.horizontal, 17).frame(height: 45)
+                SettingsNoteBody(text: content.body, font: settings.nsNoteFont, markdownEnabled: settings.markdownEnabled)
+                    .padding(.horizontal, 17).allowsHitTesting(false).accessibilityHidden(true)
+            }
+            .foregroundStyle(.black.opacity(0.73))
+            .frame(width: 400, height: 244, alignment: .topLeading)
+            .background(noteColor.color, in: RoundedRectangle(cornerRadius: 20))
+            .clipShape(RoundedRectangle(cornerRadius: 20))
+            .shadow(color: .black.opacity(0.09), radius: 12, y: 8)
+            .scaleEffect(0.68).frame(width: 272, height: 166)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(selected ? 1 : 0.88).rotationEffect(.degrees(selected ? 0 : (left ? -8 : 8)), anchor: .bottom)
+        .offset(x: selected ? 0 : (left ? -137 : 137), y: selected ? 0 : 3)
+        .zIndex(selected ? 2 : 1)
+        .accessibilityLabel("Preview \(content.title)").accessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    static func previewContent(notes: [Note], locked: Bool, index: Int) -> (title: String, body: String) {
+        if !locked, notes.indices.contains(index) { return (notes[index].title, notes[index].body) }
+        let samples = [("Weekend plans", "## A little room to think\n- [ ] Pick up coffee beans\n- [ ] Book the train\n- [x] ~~Call Sam~~"),
+                       ("For a quiet hour.", "A book, a window,\nand the phone on silent.\n\n**Make time for it.**"),
+                       ("Monday, 10 am.", "Bring the sketches.\nKeep the afternoon free.")]
+        return samples[min(max(index, 0), samples.count - 1)]
+    }
+
+    private func compactRow<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack {
+            Text(title).font(SettingsPalette.font(13, medium: true))
+            Spacer(minLength: 8)
+            trailing().controlSize(.small)
+        }.padding(.top, 13).padding(.bottom, 2).overlay(alignment: .top) { rule.frame(height: 1) }.padding(.top, 13)
     }
 
     private var about: some View {
@@ -1752,9 +2192,9 @@ struct SettingsView: View {
                     HStack(spacing: 14) {
                         Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 58, height: 58)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Margin").font(.system(size: 15, weight: .semibold))
-                            Text("Version \(versionText)").font(.system(size: 12)).foregroundStyle(.secondary)
-                            Text("Sticky notes that live at the edge of your screen.").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Text("Margin").font(SettingsPalette.font(15, medium: true))
+                            Text("Version \(versionText)").font(SettingsPalette.font(12)).foregroundStyle(secondaryInk)
+                            Text("Sticky notes that live at the edge of your screen.").font(SettingsPalette.font(12)).foregroundStyle(secondaryInk)
                         }
                     }
                 }
@@ -1765,10 +2205,10 @@ struct SettingsView: View {
                     Toggle("Automatic updates", isOn: Binding(
                         get: { updater.automaticallyChecksForUpdates && updater.automaticallyDownloadsUpdates },
                         set: { updater.automaticallyChecksForUpdates = $0; updater.automaticallyDownloadsUpdates = $0 }
-                    )).toggleStyle(.switch).labelsHidden().tint(appAccent)
+                    )).toggleStyle(.switch).labelsHidden().tint(accent)
                 }
                 settingRow("Check now", "Look for a new version manually", divider: false) {
-                    Button("Check Now") { updater.checkForUpdates() }.buttonStyle(MatteButtonStyle()).fixedSize()
+                    Button("Check Now") { updater.checkForUpdates() }.buttonStyle(SettingsButtonStyle()).fixedSize()
                 }
             }
         }
@@ -1779,21 +2219,37 @@ struct SettingsView: View {
         return Self.visibleVersion(shortVersion: version)
     }
 
-    private func heading(_ title: String, _ subtitle: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.system(size: 29, weight: .medium, design: .serif)); Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary) } }
-    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-            settingsCard(content: content)
-        }
+    private func heading(_ title: String, _ subtitle: String) -> some View {
+        VStack(spacing: 7) {
+            Text(title).font(SettingsPalette.font(30, medium: true)).tracking(-0.8)
+            Text(subtitle).font(SettingsPalette.font(12)).foregroundStyle(secondaryInk)
+        }.frame(maxWidth: .infinity).multilineTextAlignment(.center)
     }
-    private func settingsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0) { content() }
-            .padding(.horizontal, 18)
-            .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.09)))
+    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(SettingsPalette.font(13, medium: true)).padding(.bottom, 7)
+            content()
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private func settingRow<Trailing: View>(_ title: String, _ subtitle: String, divider: Bool = true, @ViewBuilder trailing: () -> Trailing) -> some View {
-        HStack { VStack(alignment: .leading, spacing: 3) { Text(title).font(.system(size: 13, weight: .medium)); Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2) }; Spacer(); trailing() }.padding(.vertical, 14).overlay(alignment: .bottom) { Divider().opacity(divider ? 0.25 : 0) }
+        HStack(spacing: 24) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title).font(SettingsPalette.font(13, medium: true))
+                Text(subtitle).font(SettingsPalette.font(12)).foregroundStyle(secondaryInk).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            trailing().fixedSize().controlSize(.small)
+        }.padding(.vertical, 12).overlay(alignment: .bottom) { rule.frame(height: divider ? 1 : 0) }
+    }
+
+    private func settingsMenu<Value: Hashable>(_ title: String, selection: Binding<Value>, options: [(Value, String)], width: CGFloat) -> some View {
+        SettingsMenu(title: title, selection: selection, options: options)
+            .padding(.leading, 9).padding(.trailing, 26).frame(width: width, height: 30)
+            .background(SettingsPalette.well, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(alignment: .trailing) {
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(secondaryInk)
+                    .padding(.trailing, 11).allowsHitTesting(false).accessibilityHidden(true)
+            }
     }
 }
 

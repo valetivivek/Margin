@@ -16,10 +16,9 @@ enum FanMode: String, CaseIterable, Codable { case hover, click }
 enum AnimationSpeed: String, CaseIterable, Codable { case fast, normal, slow }
 enum AppearanceMode: String, CaseIterable, Codable {
     case system, light, dark
-    static func initial(saved: String?, lightDefaultApplied: Bool) -> Self {
-        saved == "system" && !lightDefaultApplied ? .light : Self(rawValue: saved ?? "light") ?? .light
-    }
+    static func initial(saved: String?) -> Self { Self(rawValue: saved ?? "light") ?? .light }
 }
+enum InterfaceColor: String, CaseIterable { case clay, olive, slate, plum, graphite }
 enum ShortcutAction: String, CaseIterable, Codable { case openTop = "Open top note", newNote = "New note" }
 
 enum KeyboardAction: String, CaseIterable {
@@ -101,11 +100,14 @@ final class AppSettings: ObservableObject {
     @Published var showOverFullScreen: Bool { didSet { save("showOverFullScreen", showOverFullScreen) } }
     @Published var lockNotes: Bool { didSet { save("lockNotes", lockNotes) } }
     @Published var appearance: AppearanceMode { didSet { save("appearance", appearance.rawValue) } }
+    @Published var interfaceColor: InterfaceColor { didSet { save("interfaceColor", interfaceColor.rawValue) } }
     @Published var useDefaultColor: Bool { didSet { save("useDefaultColor", useDefaultColor) } }
     @Published var defaultColor: NoteColor { didSet { save("defaultColor", defaultColor.rawValue) } }
     @Published var shortcuts: [String: GlobalShortcut] { didSet { save("shortcuts", try? JSONEncoder().encode(shortcuts)) } }
+    @Published var disabledShortcuts: [String] { didSet { save("disabledShortcuts", disabledShortcuts) } }
     @Published var shareNotes: Bool { didSet { save("shareNotes", shareNotes) } }
     @Published var markdownEnabled: Bool { didSet { save("markdownEnabled", markdownEnabled) } }
+    @Published var markdownPreviewDelay: Double { didSet { save("markdownPreviewDelay", markdownPreviewDelay) } }
     @Published var shortcutError: String?
     @Published var shortcutAction: ShortcutAction { didSet { save("shortcutAction", shortcutAction.rawValue) } }
 
@@ -128,30 +130,31 @@ final class AppSettings: ObservableObject {
         animationSpeed = AnimationSpeed(rawValue: defaults.string(forKey: "animationSpeed") ?? "normal") ?? .normal
         cloudSyncEnabled = false // Cloud Sync is unavailable in this build.
         cloudSyncBookmark = defaults.data(forKey: "cloudSyncBookmark")
-        showInDock = defaults.object(forKey: "showInDock") as? Bool ?? true
-        if !defaults.bool(forKey: "appSwitcherDefaultApplied") {
-            showInDock = true
-            defaults.set(true, forKey: "showInDock")
-            defaults.set(true, forKey: "appSwitcherDefaultApplied")
-        }
+        showInDock = defaults.object(forKey: "showInDock") as? Bool ?? false
         display = defaults.string(forKey: "display") ?? "main"
-        showOverFullScreen = defaults.bool(forKey: "showOverFullScreen")
+        showOverFullScreen = defaults.object(forKey: "showOverFullScreen") as? Bool ?? true
         lockNotes = defaults.bool(forKey: "lockNotes")
-        let savedAppearance = defaults.string(forKey: "appearance")
-        let migrateSystemDefault = savedAppearance == "system" && !defaults.bool(forKey: "lightThemeDefaultApplied")
-        appearance = AppearanceMode.initial(saved: savedAppearance, lightDefaultApplied: defaults.bool(forKey: "lightThemeDefaultApplied"))
-        if migrateSystemDefault { defaults.set("light", forKey: "appearance") }
-        defaults.set(true, forKey: "lightThemeDefaultApplied")
+        appearance = AppearanceMode.initial(saved: defaults.string(forKey: "appearance"))
+        interfaceColor = InterfaceColor(rawValue: defaults.string(forKey: "interfaceColor") ?? "") ?? .clay
         useDefaultColor = defaults.bool(forKey: "useDefaultColor")
         defaultColor = NoteColor(rawValue: defaults.integer(forKey: "defaultColor")) ?? .amber
         shareNotes = defaults.object(forKey: "shareNotes") as? Bool ?? true
         markdownEnabled = defaults.object(forKey: "markdownEnabled") as? Bool ?? true
+        markdownPreviewDelay = min(60, max(1, defaults.object(forKey: "markdownPreviewDelay") as? Double ?? 5))
         shortcuts = defaults.data(forKey: "shortcuts").flatMap { try? JSONDecoder().decode([String: GlobalShortcut].self, from: $0) } ?? [:]
+        disabledShortcuts = defaults.stringArray(forKey: "disabledShortcuts") ?? []
         shortcutAction = ShortcutAction(rawValue: defaults.string(forKey: "shortcutAction") ?? "") ?? .newNote
         if shortcuts.isEmpty, let legacy = defaults.data(forKey: "quickShortcut").flatMap({ try? JSONDecoder().decode(GlobalShortcut.self, from: $0) }),
            !KeyboardAction.allCases.filter({ $0 != .quick }).contains(where: { $0.standard.matches(legacy) }) {
             shortcuts[KeyboardAction.quick.rawValue] = legacy
         }
+    }
+
+    func shortcutEnabled(_ action: KeyboardAction) -> Bool { !disabledShortcuts.contains(action.rawValue) }
+
+    func setShortcutEnabled(_ enabled: Bool, for action: KeyboardAction) {
+        if enabled { disabledShortcuts.removeAll { $0 == action.rawValue } }
+        else if shortcutEnabled(action) { disabledShortcuts.append(action.rawValue) }
     }
 
     func shortcut(for action: KeyboardAction) -> GlobalShortcut { shortcuts[action.rawValue] ?? action.standard }
@@ -393,12 +396,15 @@ final class NotesStore: ObservableObject {
     var active: [Note] { notes.filter { $0.archivedAt == nil }.sorted { $0.sortIndex < $1.sortIndex } }
     var archived: [Note] { notes.filter { $0.archivedAt != nil }.sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) } }
 
-    @discardableResult func create() -> Note {
-        let next = (notes.map(\Note.sortIndex).max() ?? -1) + 1
-        let color = settings.useDefaultColor
+    var nextNoteColor: NoteColor {
+        settings.useDefaultColor
             ? settings.defaultColor
             : notes.max { $0.createdAt < $1.createdAt }?.color.next ?? .amber
-        let note = Note(color: color, sortIndex: next)
+    }
+
+    @discardableResult func create() -> Note {
+        let next = (notes.map(\Note.sortIndex).max() ?? -1) + 1
+        let note = Note(color: nextNoteColor, sortIndex: next)
         notes.append(note)
         persist(note)
         return note
@@ -526,6 +532,14 @@ final class NotesStore: ObservableObject {
         for (index, var note) in items.enumerated() { note.sortIndex = Double(index); update(note, immediate: true) }
     }
 
+    func move(_ source: UUID, by step: Int) {
+        let items = active
+        guard let from = items.firstIndex(where: { $0.id == source }) else { return }
+        let to = min(items.count - 1, max(0, from + step))
+        guard from != to else { return }
+        move(source, before: items[to].id)
+    }
+
     func search(_ query: String, archivedOnly: Bool? = nil) -> [Note] {
         let source = notes.filter { archivedOnly == nil || ($0.archivedAt != nil) == archivedOnly! }
         guard !query.isEmpty else { return source }
@@ -563,9 +577,10 @@ extension JSONDecoder {
 
 enum SelfCheck {
     static func run() throws {
-        guard AppearanceMode.initial(saved: nil, lightDefaultApplied: false) == .light,
-              AppearanceMode.initial(saved: "system", lightDefaultApplied: false) == .light,
-              AppearanceMode.initial(saved: "dark", lightDefaultApplied: true) == .dark else {
+        try checkSettingsPersistence()
+        guard AppearanceMode.initial(saved: nil) == .light,
+              AppearanceMode.initial(saved: "system") == .system,
+              AppearanceMode.initial(saved: "dark") == .dark else {
             throw SelfCheckFailure("Light is not the default appearance")
         }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("margin-self-check-\(UUID().uuidString)")
@@ -626,19 +641,35 @@ enum SelfCheck {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let storeSettings = AppSettings(defaults: defaults)
-        guard storeSettings.activationDelay == 0.05, storeSettings.deckPosition == 0.5, storeSettings.display == "main", storeSettings.fontName == "Helvetica", storeSettings.showInDock else {
+        guard storeSettings.markdownPreviewDelay == 5, storeSettings.activationDelay == 0.05, storeSettings.deckPosition == 0.5, storeSettings.display == "main", storeSettings.fontName == "Helvetica", !storeSettings.showInDock, storeSettings.showOverFullScreen else {
             throw SelfCheckFailure("New deck defaults are incorrect")
+        }
+        storeSettings.showOverFullScreen = false
+        guard !AppSettings(defaults: defaults).showOverFullScreen else {
+            throw SelfCheckFailure("Saved fullscreen opt-out is overwritten by the default")
         }
         guard !storeSettings.setShortcut(KeyboardAction.archive.standard, for: .allNotes),
               storeSettings.setShortcut(GlobalShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | optionKey), key: "K"), for: .allNotes),
               AppSettings(defaults: defaults).shortcut(for: .allNotes).key == "K" else {
             throw SelfCheckFailure("Shortcut conflicts or persistence are broken")
         }
-        storeSettings.activationDelay = 0.7; storeSettings.deckPosition = 0.25; storeSettings.display = "external-display"
+        storeSettings.markdownPreviewDelay = 12; storeSettings.activationDelay = 0.7; storeSettings.deckPosition = 0.25; storeSettings.display = "external-display"
         let restored = AppSettings(defaults: defaults)
-        guard restored.activationDelay == 0.7, restored.deckPosition == 0.25, restored.display == "external-display" else {
+        guard restored.markdownPreviewDelay == 12, restored.activationDelay == 0.7, restored.deckPosition == 0.25, restored.display == "external-display" else {
             throw SelfCheckFailure("Deck preferences are not persisted")
         }
+        storeSettings.setShortcutEnabled(false, for: .hide)
+        storeSettings.setShortcutEnabled(false, for: .settings)
+        let disabledSettings = AppSettings(defaults: defaults)
+        guard !disabledSettings.shortcutEnabled(.hide), !disabledSettings.shortcutEnabled(.settings), disabledSettings.shortcutEnabled(.close) else {
+            throw SelfCheckFailure("Individual shortcut toggles do not persist independently")
+        }
+        let menu = AppDelegate.makeMainMenu(settings: disabledSettings)
+        guard menu.items.compactMap(\.submenu).flatMap(\.items).first(where: { $0.title == "Settings…" })?.keyEquivalent == "" else {
+            throw SelfCheckFailure("Disabled window shortcut still has a menu key equivalent")
+        }
+        storeSettings.setShortcutEnabled(true, for: .hide)
+        storeSettings.setShortcutEnabled(true, for: .settings)
         storeSettings.shortcuts = [:]
         let savedDefault = storeSettings.defaultColor
         let savedUseDefault = storeSettings.useDefaultColor
@@ -662,6 +693,17 @@ enum SelfCheck {
         guard store.create().color == .amber, store.create().color == .coral else {
             throw SelfCheckFailure("Consecutive new notes do not rotate colors")
         }
+        let originalOrder = store.active.map(\.id)
+        let reorderedID = originalOrder[0]
+        store.move(reorderedID, by: 1)
+        guard store.active[1].id == reorderedID else { throw SelfCheckFailure("Wheel reordering does not move down a slot") }
+        store.move(reorderedID, by: -1)
+        store.move(reorderedID, by: -1)
+        guard store.active.map(\.id) == originalOrder else { throw SelfCheckFailure("Wheel reordering does not clamp at the first slot") }
+        store.move(reorderedID, by: originalOrder.count)
+        store.move(reorderedID, by: 1)
+        guard store.active.last?.id == reorderedID else { throw SelfCheckFailure("Wheel reordering does not clamp at the final slot") }
+        store.move(reorderedID, by: -originalOrder.count)
         var publications = 0
         let observation = store.objectWillChange.sink { publications += 1 }
         for index in 0..<100 { edited.body = "keystroke \(index)"; store.update(edited) }
@@ -679,6 +721,46 @@ enum SelfCheck {
             throw SelfCheckFailure("Quitting for an update loses pending note edits")
         }
         print("Margin self-check passed")
+    }
+
+    private static func checkSettingsPersistence() throws {
+        let suite = "margin-preference-check-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let shortcut = GlobalShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | optionKey), key: "K")
+        let noteID = UUID()
+        let saved: [String: Any] = [
+            "side": "left", "deckPosition": 0.3, "activationDelay": 0.65, "fanMode": "click", "keepOpen": true,
+            "fontName": "American Typewriter", "textSize": 19.0, "animationSpeed": "slow",
+            "cloudSyncEnabled": true, "cloudSyncBookmark": Data([1, 2, 3]), "showInDock": true,
+            "display": "disconnected-display", "showOverFullScreen": true, "lockNotes": true, "appearance": "system",
+            "useDefaultColor": true, "defaultColor": NoteColor.lilac.rawValue,
+            "shortcuts": try JSONEncoder().encode(["quick": shortcut]), "disabledShortcuts": ["hide", "settings"],
+            "shareNotes": false, "markdownEnabled": false, "markdownPreviewDelay": 17.0, "shortcutAction": "Open top note",
+            "lastNoteX": 101.0, "lastNoteY": 202.0, "lastOpenNoteID": noteID.uuidString,
+            "SUEnableAutomaticChecks": false, "SUAutomaticallyUpdate": false
+        ]
+        defaults.setPersistentDomain(saved, forName: suite)
+        let restored = AppSettings(defaults: defaults)
+        guard restored.side == .left, restored.deckPosition == 0.3, restored.activationDelay == 0.65,
+              restored.fanMode == .click, restored.keepOpen, restored.fontName == "American Typewriter", restored.textSize == 19,
+              restored.animationSpeed == .slow, !restored.cloudSyncEnabled, restored.cloudSyncBookmark == Data([1, 2, 3]),
+              restored.showInDock, restored.display == "disconnected-display", restored.showOverFullScreen, restored.lockNotes,
+              restored.appearance == .system, restored.interfaceColor == .clay, restored.useDefaultColor, restored.defaultColor == .lilac,
+              restored.shortcut(for: .quick) == shortcut, restored.disabledShortcuts == ["hide", "settings"],
+              !restored.shareNotes, !restored.markdownEnabled, restored.markdownPreviewDelay == 17, restored.shortcutAction == .openTop,
+              restored.lastNotePosition?.x == 101, restored.lastNotePosition?.y == 202, restored.lastOpenNoteID == noteID,
+              NSDictionary(dictionary: defaults.persistentDomain(forName: suite) ?? [:]).isEqual(to: saved) else {
+            throw SelfCheckFailure("Loading settings resets an existing preference")
+        }
+        restored.interfaceColor = .slate
+        restored.appearance = .dark
+        var expected = saved; expected["interfaceColor"] = "slate"; expected["appearance"] = "dark"
+        let reopened = AppSettings(defaults: defaults)
+        guard reopened.interfaceColor == .slate, reopened.appearance == .dark,
+              NSDictionary(dictionary: defaults.persistentDomain(forName: suite) ?? [:]).isEqual(to: expected) else {
+            throw SelfCheckFailure("Appearance changes overwrite unrelated settings or fail to persist")
+        }
     }
 }
 
