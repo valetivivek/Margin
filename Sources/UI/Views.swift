@@ -4,6 +4,16 @@ import Sparkle
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension Note {
+    var displayColor: Color {
+        guard let hex = presentation?.colorHex else { return color.color }
+        // Keep the note surface light enough for its dark text and controls.
+        let chosen = NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+        return Color(nsColor: chosen.blended(withFraction: 0.7, of: .white) ?? chosen)
+    }
+    var symbol: String { presentation?.icon.flatMap { NoteIcons.all.contains($0) ? $0 : nil } ?? "note.text" }
+}
+
 private let appPaper = Color(nsColor: NSColor(name: nil) { appearance in
     appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         ? NSColor(calibratedWhite: 0.12, alpha: 1)
@@ -266,18 +276,21 @@ final class DragHandleNSView: NSView {
     }
 }
 
-private struct DragHandle: NSViewRepresentable {
+struct DragHandle: NSViewRepresentable {
+    var accessibilityLabel: String? = nil
     var willDrag: (() -> Void)? = nil
     var dragging: ((NSPoint) -> Void)? = nil
     var didDrag: ((Bool) -> Void)? = nil
     func makeNSView(context: Context) -> DragHandleNSView {
         let view = DragHandleNSView()
         view.setAccessibilityElement(true)
-        view.setAccessibilityLabel(willDrag == nil ? "Move note" : "Move deck")
         updateNSView(view, context: context)
         return view
     }
-    func updateNSView(_ view: DragHandleNSView, context: Context) { view.willDrag = willDrag; view.dragging = dragging; view.didDrag = didDrag }
+    func updateNSView(_ view: DragHandleNSView, context: Context) {
+        view.setAccessibilityLabel(accessibilityLabel ?? (willDrag == nil ? "Move note" : "Move deck"))
+        view.willDrag = willDrag; view.dragging = dragging; view.didDrag = didDrag
+    }
 }
 
 final class HeldCardGesture {
@@ -349,9 +362,15 @@ final class DeckCardInteractionView: NSView, NSDraggingSource {
         let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self)
         addTrackingArea(area); tracking = area
     }
-    override func mouseEntered(with event: NSEvent) { hover(true) }
-    override func mouseMoved(with event: NSEvent) { hover(true) }
-    override func mouseExited(with event: NSEvent) { if !gesture.active { hover(false) } }
+    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+    override func mouseMoved(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { hover(true) }
+    }
+    override func mouseExited(with event: NSEvent) {
+        // Resizing a tracking area can emit an exit even though the pointer remains inside.
+        guard !gesture.active, !bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        hover(false)
+    }
     override func mouseDown(with event: NSEvent) {
         downPoint = NSEvent.mouseLocation; exporting = false
         downFrame = window?.convertToScreen(convert(bounds, to: nil)) ?? .zero
@@ -367,13 +386,19 @@ final class DeckCardInteractionView: NSView, NSDraggingSource {
         guard hypot(point.x - downPoint.x, point.y - downPoint.y) > 6,
               !downFrame.insetBy(dx: -8, dy: -8).contains(point) else { return }
         do {
-            let url = try NoteFile(note: note).write()
             let item = NSPasteboardItem()
-            item.setString(url.absoluteString, forType: .fileURL)
             item.setString(note.id.uuidString, forType: NSPasteboard.PasteboardType(NoteFile.dragType.identifier))
             let dragItem = NSDraggingItem(pasteboardWriter: item)
+            let image: NSImage
+            if note.id == CalendarWing.id {
+                image = NSImage(systemSymbolName: "calendar", accessibilityDescription: "Calendar") ?? NSImage(size: NSSize(width: 40, height: 40))
+            } else {
+                let url = try NoteFile(note: note).write()
+                item.setString(url.absoluteString, forType: .fileURL)
+                image = NSWorkspace.shared.icon(forFile: url.path)
+            }
             dragItem.setDraggingFrame(NSRect(origin: convert(event.locationInWindow, from: nil), size: NSSize(width: 40, height: 40)),
-                                      contents: NSWorkspace.shared.icon(forFile: url.path))
+                                      contents: image)
             exporting = true; startedDrag()
             beginDraggingSession(with: [dragItem], event: event, source: self)
         } catch { reportError(error.localizedDescription); endGesture() }
@@ -385,7 +410,7 @@ final class DeckCardInteractionView: NSView, NSDraggingSource {
         if shouldOpen { activate() }
     }
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        context == .outsideApplication ? .copy : .move
+        note.id == CalendarWing.id || context != .outsideApplication ? .move : .copy
     }
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { endGesture() }
     private func endGesture() {
@@ -438,7 +463,7 @@ struct EdgeDeckView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var model: EdgePanelModel
     let expand: (Bool) -> Void
-    let hover: (Bool) -> Void
+    let hover: (Bool) -> Bool
     let beginDrag: () -> Void
     let draggingDeck: (NSPoint) -> Void
     let endDrag: (Bool) -> Void
@@ -452,10 +477,13 @@ struct EdgeDeckView: View {
     @State private var hoverReadyAt = 0.0
     @State private var plusHovered = false
 
+    private var deckItems: [Note] { CalendarWing.items(notes: store.active, enabled: settings.calendarEnabled, position: settings.calendarPosition, limit: model.noteLimit, color: settings.calendarColor) }
+    private var collapsedDeckItems: [Note] { deckItems.filter { $0.id != CalendarWing.id } }
+
     var body: some View {
         ZStack(alignment: model.side == .bottom ? .bottom : (model.side == .right ? .trailing : .leading)) {
             Color.clear
-            if store.active.isEmpty {
+            if deckItems.isEmpty {
                 deckAddButton.contextMenu { deckMenu }
             } else if model.side == .bottom {
                 if model.expanded || settings.keepOpen { bottomFan } else { bottomPill }
@@ -464,7 +492,7 @@ struct EdgeDeckView: View {
             } else {
                 pill
             }
-            if let undo = store.undoNote, !store.active.isEmpty {
+            if let undo = store.undoNote, !deckItems.isEmpty {
                 HStack(spacing: 8) {
                     Text("\(undo.title) deleted").lineLimit(1)
                     Button("Undo") { store.undoDelete() }.buttonStyle(.borderless).fontWeight(.semibold)
@@ -479,8 +507,8 @@ struct EdgeDeckView: View {
     private var bottomPill: some View {
         Button { expand(true) } label: {
             HStack(spacing: 6) {
-                ForEach(Array(store.active.prefix(model.noteLimit))) { note in
-                    Capsule().fill(note.color.color).frame(width: 16, height: 6)
+                ForEach(collapsedDeckItems) { note in
+                    Capsule().fill(note.displayColor).frame(width: 16, height: 6)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
@@ -488,7 +516,7 @@ struct EdgeDeckView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover(perform: hover)
+        .onHover { _ = hover($0) }
         .contextMenu { deckMenu }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .accessibilityLabel("Show Margin deck")
@@ -496,9 +524,12 @@ struct EdgeDeckView: View {
 
     private var bottomFan: some View {
         HStack(alignment: .bottom, spacing: 0) {
-            ForEach(Array(store.active.prefix(model.noteLimit).enumerated()), id: \.element.id) { index, note in
-                bottomSlot(note, index: index)
-                    .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
+            ForEach(Array(deckItems.enumerated()), id: \.element.id) { index, note in
+                if note.id == CalendarWing.id { calendarSlot(index: index) }
+                else {
+                    bottomSlot(note, index: index)
+                        .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store, settings: settings, side: model.side))
+                }
             }
         }
         .overlay(alignment: .bottomTrailing) { deckControls.offset(x: 72) }
@@ -506,7 +537,7 @@ struct EdgeDeckView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .contentShape(Rectangle())
         .onHover { inside in
-            if !inside { hovered = nil }; hover(inside)
+            if !hover(inside) { hovered = nil }
         }
         .onAppear { hovered = nil; hoverReadyAt = ProcessInfo.processInfo.systemUptime + settings.fanDuration }
         .onDisappear { hovered = nil }
@@ -519,14 +550,14 @@ struct EdgeDeckView: View {
             ZStack(alignment: .bottom) {
                 if lifted {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                        Text(settings.markdownEnabled ? NoteMarkdown.preview(current.body, font: settings.nsNoteFont) : AttributedString(current.body))
+                        Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Text(NoteMarkdown.preview(current, font: settings.nsNoteFont, markdown: settings.markdownEnabled))
                             .lineLimit(4)
                         Spacer(minLength: 0)
                     }
                     .font(settings.noteFont).foregroundStyle(.black.opacity(0.72))
                     .padding(12).frame(width: DeckCardMetrics.contentWidth, height: DeckCardMetrics.height, alignment: .topLeading)
-                    .background(current.color.color, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background(current.displayColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .modifier(CardShadow(lifted: true))
                     .padding(.bottom, 34)
                     .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
@@ -535,7 +566,7 @@ struct EdgeDeckView: View {
                     .font(.system(size: 10, weight: .semibold)).lineLimit(1)
                     .foregroundStyle(.black.opacity(0.66)).padding(.horizontal, 9)
                     .frame(width: DeckCardMetrics.bottomStep - 7, height: 30)
-                    .background(current.color.color, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(current.displayColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
         }
         .buttonStyle(.plain)
@@ -544,17 +575,18 @@ struct EdgeDeckView: View {
         .overlay(alignment: .bottom) {
             cardInteraction(note, lifted: lifted)
                 .frame(width: lifted ? DeckCardMetrics.contentWidth : DeckCardMetrics.bottomStep, height: 210)
+                .transaction { $0.animation = nil }
             }
-        .contextMenu { noteMenu(current) }
+        .contextMenu { if note.id == CalendarWing.id { Button("Open Calendar") { open(note.id) }; Button("Settings…", action: showSettings) } else { noteMenu(current) } }
         .zIndex(lifted ? 20 : Double(index))
-        .animation(reduceMotion ? nil : .easeOut(duration: settings.cardDuration), value: lifted)
+        .animation(reduceMotion || model.dragging ? nil : .easeOut(duration: settings.animationDuration), value: lifted)
         .help(current.title)
         .accessibilityLabel("\(current.title), \(current.color.name)")
     }
 
     private var pill: some View {
         VStack(spacing: 5) {
-            if store.active.isEmpty {
+            if deckItems.isEmpty {
                 Button(action: create) {
                     Image(systemName: "plus").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                         .frame(width: 18, height: 18).background(.regularMaterial, in: Circle())
@@ -563,8 +595,8 @@ struct EdgeDeckView: View {
             } else {
                 Button { expand(true) } label: {
                     VStack(spacing: 6) {
-                        ForEach(Array(store.active.prefix(model.noteLimit))) { note in
-                            Capsule().fill(note.color.color).frame(width: 6, height: 16)
+                        ForEach(collapsedDeckItems) { note in
+                            Capsule().fill(note.displayColor).frame(width: 6, height: 16)
                         }
                     }
                     .padding(.horizontal, 3).padding(.vertical, 9)
@@ -573,7 +605,7 @@ struct EdgeDeckView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .onHover(perform: hover)
+                .onHover { _ = hover($0) }
                 .contextMenu { deckMenu }
                 .accessibilityLabel("Show Margin deck")
             }
@@ -582,16 +614,16 @@ struct EdgeDeckView: View {
     }
 
     private var fan: some View {
-        let notes = Array(store.active.prefix(model.noteLimit))
-        let hoveredIndex = notes.firstIndex { $0.id == hovered }
+        let notes = deckItems
         let edge: Alignment = model.side == .right ? .trailing : .leading
         return ZStack(alignment: edge) {
             VStack(spacing: DeckCardMetrics.spacing) {
                 ForEach(Array(notes.enumerated()), id: \.element.id) { index, note in
-                    deckCard(note, index: index)
-                            .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store))
-                        .offset(y: DeckCardMetrics.spreadOffset(index: index, hoveredIndex: hoveredIndex))
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
+                    if note.id == CalendarWing.id { calendarSlot(index: index) }
+                    else {
+                        deckCard(note, index: index)
+                            .onDrop(of: [NoteFile.dragType], delegate: NoteDropDelegate(target: note.id, dragging: $dragging, store: store, settings: settings, side: model.side))
+                    }
                 }
             }
             .frame(height: DeckCardMetrics.stackHeight(count: notes.count))
@@ -602,8 +634,7 @@ struct EdgeDeckView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge)
         .contentShape(Rectangle())
         .onHover { inside in
-            if !inside { hovered = nil }
-            hover(inside)
+            if !hover(inside) { hovered = nil }
         }
         .onAppear { hovered = nil; hoverReadyAt = ProcessInfo.processInfo.systemUptime + settings.fanDuration }
         .onDisappear { hovered = nil }
@@ -617,8 +648,8 @@ struct EdgeDeckView: View {
                 .help("Drag to the left, right or bottom edge. Release elsewhere to return to the previous position.")
         }
         .overlay(alignment: .top) {
-            if store.active.count > model.noteLimit {
-                Button("+\(store.active.count - model.noteLimit) more") { showAll() }
+            if store.active.count > model.noteLimit - (settings.calendarEnabled ? 1 : 0) {
+                Button("+\(store.active.count - model.noteLimit + (settings.calendarEnabled ? 1 : 0)) more") { showAll() }
                     .buttonStyle(.borderless).fixedSize()
                     .offset(x: model.side == .bottom ? 0 : (model.side == .left ? 60 : -60), y: model.side == .bottom ? -24 : 0)
                     .help("Show all notes")
@@ -640,9 +671,37 @@ struct EdgeDeckView: View {
         }
         .buttonStyle(.plain).frame(width: 40, height: 40).contentShape(Circle())
         .onHover { plusHovered = $0; if $0 { expand(true) } }
-        .animation(reduceMotion ? nil : .timingCurve(0.20, 1.00, 0.30, 1.00, duration: 0.20 * settings.animationScale), value: plusHovered)
+        .animation(reduceMotion || model.dragging ? nil : .timingCurve(0.20, 1.00, 0.30, 1.00, duration: 0.20 * settings.animationScale), value: plusHovered)
         .zIndex(20)
         .accessibilityLabel("Add")
+    }
+
+    private func calendarSlot(index: Int) -> some View {
+        Button { open(CalendarWing.id) } label: {
+            VStack(spacing: 5) {
+                Image(systemName: "calendar").font(.system(size: 15, weight: .medium))
+                if model.side != .bottom { Text(Date().formatted(.dateTime.day())).font(.system(size: 13, weight: .semibold)) }
+            }
+            .foregroundStyle(.black.opacity(0.75))
+            .frame(width: model.side == .bottom ? DeckCardMetrics.bottomStep - 7 : 34,
+                   height: model.side == .bottom ? 30 : DeckCardMetrics.height)
+            .background(settings.calendarColor.color, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: model.side == .bottom ? DeckCardMetrics.bottomStep : DeckCardMetrics.visibleWidth,
+               height: model.side == .bottom ? 210 : DeckCardMetrics.height,
+               alignment: model.side == .bottom ? .bottom : model.side == .right ? .trailing : .leading)
+        .overlay(alignment: model.side == .bottom ? .bottom : model.side == .right ? .trailing : .leading) {
+            cardInteraction(CalendarWing.item(color: settings.calendarColor), lifted: false)
+                .frame(width: model.side == .bottom ? DeckCardMetrics.bottomStep : 34,
+                       height: model.side == .bottom ? 30 : DeckCardMetrics.height)
+                .transaction { $0.animation = nil }
+        }
+        .opacity(model.fanVisible ? 1 : 0)
+        .zIndex(Double(index))
+        .contextMenu { Button("Open Calendar") { open(CalendarWing.id) }; Button("Calendar Settings…", action: showSettings) }
+        .accessibilityLabel("Calendar").help("Click to open the month calendar")
     }
 
     private func deckCard(_ note: Note, index: Int) -> some View {
@@ -650,7 +709,7 @@ struct EdgeDeckView: View {
         let lifted = hovered == note.id
         let activeOffset = lifted ? DeckCardMetrics.liftedOffset : DeckCardMetrics.tuckedOffset(index: index)
         let offset = reduceMotion || model.fanVisible ? activeOffset : DeckCardMetrics.hiddenOffset
-        let isLast = index == min(store.active.count, model.noteLimit) - 1
+        let isLast = index == deckItems.count - 1
         let edge: Alignment = model.side == .right ? .trailing : .leading
         return Button { activate(note, lifted: lifted) } label: {
             ZStack(alignment: edge) {
@@ -659,17 +718,17 @@ struct EdgeDeckView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         if model.side == .right {
-                            Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                            Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                             Spacer(minLength: 0)
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
                         } else {
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
                             Spacer(minLength: 0)
-                            Text(current.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                            Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                         }
                     }
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(settings.markdownEnabled ? NoteMarkdown.preview(current.body, font: settings.nsNoteFont) : AttributedString(current.body))
+                        Text(NoteMarkdown.preview(current, font: settings.nsNoteFont, markdown: settings.markdownEnabled))
                             .lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(settings.noteFont).foregroundStyle(.black.opacity(0.72))
@@ -681,13 +740,13 @@ struct EdgeDeckView: View {
             }
             .frame(width: DeckCardMetrics.width, height: DeckCardMetrics.height)
             .foregroundStyle(.black.opacity(0.73))
-            .background(current.color.color, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(current.displayColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .modifier(CardShadow(lifted: lifted))
             .rotationEffect(.degrees(model.side == .right ? -2.2 : 2.2))
             .offset(x: model.side == .right ? offset : -offset)
             .opacity(model.fanVisible ? 1 : (reduceMotion ? 0 : 1))
-                .animation(reduceMotion ? nil : .timingCurve(0.20, 1.05, 0.30, 1.00, duration: settings.cardDuration), value: lifted)
-                .animation(reduceMotion ? nil : .timingCurve(0.20, 1.08, 0.30, 1.00, duration: settings.fanDuration).delay(Double(index) * 0.03 * settings.animationScale), value: model.fanVisible)
+                .animation(reduceMotion || model.dragging ? nil : .easeOut(duration: settings.animationDuration), value: lifted)
+                .animation(reduceMotion || model.dragging ? nil : .easeOut(duration: settings.animationDuration), value: model.fanVisible)
             }
         }
         .buttonStyle(.plain)
@@ -696,9 +755,10 @@ struct EdgeDeckView: View {
             cardInteraction(note, lifted: lifted)
                 .frame(width: DeckCardMetrics.hoverWidth(lifted: lifted, index: index),
                        height: DeckCardMetrics.hoverHeight(lifted: lifted, isLast: isLast))
+                .transaction { $0.animation = nil }
         }
         .zIndex(Double(index))
-        .contextMenu { noteMenu(current) }
+        .contextMenu { if note.id == CalendarWing.id { Button("Open Calendar") { open(note.id) }; Button("Settings…", action: showSettings) } else { noteMenu(current) } }
         .help(current.title)
         .accessibilityLabel("\(current.title), \(current.color.name), edited \(current.updatedAt.formatted(date: .omitted, time: .shortened))")
     }
@@ -710,14 +770,19 @@ struct EdgeDeckView: View {
 
     private func cardInteraction(_ note: Note, lifted: Bool) -> some View {
         DeckCardInteraction(note: store.note(note.id) ?? note, gesture: model.cardGesture,
-            activate: { activate(note, lifted: lifted) },
+            activate: { note.id == CalendarWing.id ? open(note.id) : activate(note, lifted: lifted) },
             hover: { inside in
                 guard model.reorderingNote == nil else { return }
+                guard note.id != CalendarWing.id else { return }
                 if inside && settings.fanMode == .hover && DeckHoverGate.isReady(now: ProcessInfo.processInfo.systemUptime, readyAt: hoverReadyAt) { hovered = note.id }
                 if !inside && settings.fanMode == .hover && hovered == note.id { hovered = nil }
             },
             holding: { model.reorderingNote = $0 ? note.id : nil },
-            reorder: { store.move(note.id, by: $0) },
+            reorder: { step in
+                if note.id == CalendarWing.id {
+                    settings.calendarPosition = CalendarWing.movedPosition(settings.calendarPosition, by: step, noteCount: store.active.count, limit: model.noteLimit)
+                } else { store.move(note.id, by: step) }
+            },
             startedDrag: { dragging = note.id },
             error: { store.errorMessage = $0 })
     }
@@ -732,15 +797,15 @@ struct EdgeDeckView: View {
             .padding(.top, 10).frame(width: DeckCardMetrics.tabWidth, height: DeckCardMetrics.height, alignment: .top)
             .overlay(alignment: model.side == .right ? .trailing : .leading) {
                 Path { path in path.move(to: .zero); path.addLine(to: CGPoint(x: 0, y: DeckCardMetrics.height - 24)) }
-                    .stroke(.black.opacity(0.16), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                    .stroke(.black.opacity(0.36), style: StrokeStyle(lineWidth: 1.2, dash: [2, 3]))
                     .frame(width: 1, height: DeckCardMetrics.height - 24).padding(.vertical, 12)
             }
     }
 
     @ViewBuilder private func noteMenu(_ note: Note) -> some View {
         Menu { ForEach(NoteColor.allCases, id: \.rawValue) { value in
-            Button { var copy = note; copy.color = value; store.update(copy, immediate: true) } label: {
-                HStack { Image(nsImage: value.menuImage); Text(value.name); if note.color == value { Image(systemName: "checkmark") } }
+            Button { var copy = note; copy.color = value; copy.presentation?.colorHex = nil; store.update(copy, immediate: true) } label: {
+                HStack { Image(nsImage: value.menuImage); Text(value.name); if note.color == value && note.presentation?.colorHex == nil { Image(systemName: "checkmark") } }
             }
         } } label: { Label("Color", systemImage: "paintpalette") }
         Button { var copy = note; copy.pinned.toggle(); store.update(copy, immediate: true); if copy.pinned { open(copy.id) } } label: {
@@ -809,7 +874,6 @@ enum DeckCardMetrics {
     static let tabWidth: CGFloat = 34
     static let liftedOffset = width - visibleWidth
     static let hiddenOffset = width - 6
-    static let hoverSpread: CGFloat = 24
     static let bottomStep: CGFloat = 104
 
     static func stackHeight(count: Int) -> CGFloat { count == 0 ? 0 : height + CGFloat(count - 1) * step }
@@ -817,23 +881,49 @@ enum DeckCardMetrics {
     static func tuckedOffset(index: Int) -> CGFloat { width - tabWidth - CGFloat(index * 4) }
     static func hoverWidth(lifted: Bool, index: Int) -> CGFloat { lifted ? visibleWidth : tabWidth + CGFloat(index * 4) }
     static func hoverHeight(lifted: Bool, isLast: Bool) -> CGFloat { lifted || isLast ? height : step }
-    static func spreadOffset(index: Int, hoveredIndex: Int?) -> CGFloat { hoveredIndex.map { index > $0 ? hoverSpread : 0 } ?? 0 }
 }
 
 private struct NoteDropDelegate: DropDelegate {
     let target: UUID
     @Binding var dragging: UUID?
     let store: NotesStore
-    func dropEntered(info: DropInfo) { if let dragging, dragging != target { store.move(dragging, before: target) } }
+    let settings: AppSettings
+    let side: ScreenSide
+    func dropEntered(info: DropInfo) {
+        guard let dragging, dragging != target else { return }
+        if dragging == CalendarWing.id, let targetIndex = store.active.firstIndex(where: { $0.id == target }) {
+            let after = side == .bottom ? info.location.x > DeckCardMetrics.bottomStep / 2 : info.location.y > DeckCardMetrics.height / 2
+            settings.calendarPosition = targetIndex + (after ? 1 : 0)
+        } else if target != CalendarWing.id { store.move(dragging, before: target) }
+    }
     func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
 }
 
 final class ChecklistNSTextView: NSTextView {
     private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     var changed: ((String) -> Void)?
+    var richChanged: ((Data?) -> Void)?
     var cancelled: (() -> Void)?
-    var noteFont: NSFont = .systemFont(ofSize: 21)
-    var markdownEnabled = true
+    var noteFont: NSFont = .systemFont(ofSize: 21) {
+        didSet {
+            guard hasRichFormatting,
+                  oldValue.fontName != noteFont.fontName || oldValue.pointSize != noteFont.pointSize,
+                  let storage = textStorage else { return }
+            NoteMarkdown.matchFonts(in: storage, sourceBaseSize: oldValue.pointSize, targetFont: noteFont)
+            if let font = typingAttributes[.font] as? NSFont {
+                typingAttributes[.font] = NoteMarkdown.matchingFont(font, sourceBaseSize: oldValue.pointSize, targetFont: noteFont)
+            }
+        }
+    }
+    var markdownEnabled = false {
+        didSet {
+            if oldValue != markdownEnabled {
+                hasRichFormatting = false
+                textStorage?.setAttributes(normalTypingAttributes, range: NSRange(location: 0, length: (string as NSString).length))
+            }
+        }
+    }
+    private var hasRichFormatting = false
     private var codeRanges: [NSRange] = []
     var previewDelay: Double = 5
     private(set) var isPreview = true
@@ -896,8 +986,11 @@ final class ChecklistNSTextView: NSTextView {
 
     override func didChangeText() {
         super.didChangeText()
-        if markdownEnabled { beginSourceEditing() } else { applyStyle() }
-        changed?(string); needsDisplay = true
+        if markdownEnabled { beginSourceEditing() } else { hasRichFormatting = true }
+        applyStyle()
+        changed?(string)
+        richChanged?(markdownEnabled ? nil : richData())
+        needsDisplay = true
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
@@ -908,6 +1001,14 @@ final class ChecklistNSTextView: NSTextView {
            let shortcut = Self.checklistShortcutRange(in: string, before: range.location) {
             super.insertText("- [ ] ", replacementRange: shortcut)
             return
+        }
+        if value == " ", range.length == 0, range.location > 0 {
+            let text = string as NSString
+            let line = text.lineRange(for: NSRange(location: range.location - 1, length: 0))
+            if text.substring(with: NSRange(location: line.location, length: range.location - line.location)) == "-" {
+                super.insertText("• ", replacementRange: NSRange(location: line.location, length: 1))
+                return
+            }
         }
         super.insertText(insertString, replacementRange: replacementRange)
     }
@@ -934,10 +1035,12 @@ final class ChecklistNSTextView: NSTextView {
     }
 
     private var normalTypingAttributes: [NSAttributedString.Key: Any] {
-        [.font: noteFont, .foregroundColor: NSColor.black.withAlphaComponent(0.76)]
+        [.font: noteFont, .foregroundColor: NSColor.black]
     }
 
     func applyStyle() {
+        usesAdaptiveColorMappingForDarkAppearance = false
+        appearance = NSAppearance(named: .aqua)
         guard let storage = textStorage else { return }
         let selection = selectedRanges
         selectedTextAttributes = [
@@ -945,28 +1048,60 @@ final class ChecklistNSTextView: NSTextView {
             .foregroundColor: NSColor.black.withAlphaComponent(0.88)
         ]
         storage.beginEditing()
-        storage.setAttributes(normalTypingAttributes, range: NSRange(location: 0, length: storage.length))
+        let priorTyping = typingAttributes
+        if markdownEnabled || !hasRichFormatting {
+            storage.setAttributes(normalTypingAttributes, range: NSRange(location: 0, length: storage.length))
+        } else {
+            storage.removeAttribute(.paragraphStyle, range: NSRange(location: 0, length: storage.length))
+            storage.enumerateAttribute(.font, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+                if (value as? NSFont)?.pointSize ?? 0 < 1 { storage.addAttributes(self.normalTypingAttributes, range: range) }
+            }
+        }
+        storage.addAttribute(.foregroundColor, value: NSColor.black, range: NSRange(location: 0, length: storage.length))
         if markdownEnabled && !isPreview {
             codeRanges = []
+            (string as NSString).enumerateSubstrings(in: NSRange(location: 0, length: storage.length), options: [.byLines]) { line, range, _, _ in
+                guard let line else { return }
+                let prefix = ChecklistLine.parse(line) != nil ? String(line.prefix(6)) : line.hasPrefix("• ") ? "• " : line.hasPrefix("- ") ? "- " : ""
+                guard !prefix.isEmpty else { return }
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.headIndent = (prefix as NSString).size(withAttributes: [.font: self.noteFont]).width
+                storage.addAttribute(.paragraphStyle, value: paragraph, range: range)
+            }
             storage.endEditing(); selectedRanges = selection
             typingAttributes = normalTypingAttributes
-            insertionPointColor = NSColor.black.withAlphaComponent(0.76)
+            insertionPointColor = NSColor.black
             needsDisplay = true
             return
         }
         codeRanges = markdownEnabled ? NoteMarkdown.apply(to: storage, font: noteFont) : []
         (string as NSString).enumerateSubstrings(in: NSRange(location: 0, length: (string as NSString).length), options: [.byLines, .substringNotRequired]) { _, range, _, _ in
             guard !self.codeRanges.contains(where: { NSIntersectionRange($0, range).length > 0 }) else { return }
+            if (self.string as NSString).substring(with: range).hasPrefix("• ") {
+                let paragraph = NSMutableParagraphStyle()
+                let bodyFont = range.length > 2 ? (storage.attribute(.font, at: range.location + 2, effectiveRange: nil) as? NSFont ?? self.noteFont) : self.noteFont
+                storage.addAttributes([.font: NSFont.systemFont(ofSize: bodyFont.pointSize * 1.3, weight: .bold),
+                                       .baselineOffset: -bodyFont.pointSize * 0.06], range: NSRange(location: range.location, length: 1))
+                paragraph.headIndent = storage.attributedSubstring(from: NSRange(location: range.location, length: 2)).size().width
+                storage.addAttribute(.paragraphStyle, value: paragraph, range: range)
+            }
             if range.length >= 6 {
                 let prefix = (self.string as NSString).substring(with: NSRange(location: range.location, length: 6)).lowercased()
                 if prefix == "- [ ] " || prefix == "- [x] " {
                     let marker = NSRange(location: range.location, length: 6)
                     let paragraph = NSMutableParagraphStyle()
-                    paragraph.firstLineHeadIndent = self.checklistIndent; paragraph.headIndent = self.checklistIndent
+                    let taskFont = self.taskFont(at: range.location)
+                    let indent = ChecklistMarkGeometry.boxSize(font: taskFont) + 8
+                    paragraph.firstLineHeadIndent = indent; paragraph.headIndent = indent
                     paragraph.minimumLineHeight = self.layoutManager?.defaultLineHeight(for: self.noteFont)
                         ?? ceil(self.noteFont.ascender - self.noteFont.descender + self.noteFont.leading)
                     storage.addAttributes([.foregroundColor: NSColor.clear, .font: NSFont.systemFont(ofSize: 0.01)], range: marker)
                     storage.addAttribute(.paragraphStyle, value: paragraph, range: range)
+                    if !self.markdownEnabled, range.length > 6 {
+                        let body = NSRange(location: range.location + 6, length: range.length - 6)
+                        storage.removeAttribute(.strikethroughStyle, range: body)
+                        storage.addAttribute(.foregroundColor, value: NSColor.black, range: body)
+                    }
                     if prefix == "- [x] ", range.length > 6 {
                         let body = NSRange(location: range.location + 6, length: range.length - 6)
                         let value = (self.string as NSString).substring(with: body)
@@ -992,8 +1127,11 @@ final class ChecklistNSTextView: NSTextView {
             storage.addAttributes([.link: url, .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue], range: range)
         }
         storage.endEditing(); selectedRanges = selection
-        typingAttributes = normalTypingAttributes
-        insertionPointColor = NSColor.black.withAlphaComponent(0.76)
+        typingAttributes = markdownEnabled || !hasRichFormatting
+            ? normalTypingAttributes
+            : (priorTyping[.font] == nil ? normalTypingAttributes : priorTyping)
+        typingAttributes[.foregroundColor] = NSColor.black
+        insertionPointColor = NSColor.black
     }
 
     override func viewDidMoveToWindow() {
@@ -1029,6 +1167,14 @@ final class ChecklistNSTextView: NSTextView {
         let ns = string as NSString
         let cursor = min(selectedRange().location, ns.length)
         let line = ns.lineRange(for: NSRange(location: cursor, length: 0))
+        let lineText = ns.substring(with: line).trimmingCharacters(in: .newlines)
+        if lineText.hasPrefix("• ") || lineText.hasPrefix("- ") && !lineText.hasPrefix("- [") {
+            let prefix = String(lineText.prefix(2))
+            if lineText.dropFirst(2).trimmingCharacters(in: .whitespaces).isEmpty {
+                insertText("", replacementRange: NSRange(location: line.location, length: (lineText as NSString).length))
+            } else { insertText("\n" + prefix, replacementRange: selectedRange()) }
+            return
+        }
         guard line.length >= 6 else { super.insertNewline(sender); return }
         let marker = NSRange(location: line.location, length: 6)
         let prefix = ns.substring(with: marker).lowercased()
@@ -1043,6 +1189,15 @@ final class ChecklistNSTextView: NSTextView {
 
     var checklistIndent: CGFloat { ChecklistMarkGeometry.boxSize(font: noteFont) + 8 }
 
+    private func taskFont(at character: Int) -> NSFont {
+        guard let storage = textStorage else { return noteFont }
+        let end = NSMaxRange((string as NSString).lineRange(for: NSRange(location: character, length: 0)))
+        for index in (character + 6)..<max(character + 6, min(end, storage.length)) {
+            if let font = storage.attribute(.font, at: index, effectiveRange: nil) as? NSFont, font.pointSize >= 1 { return font }
+        }
+        return noteFont
+    }
+
     func checkboxRect(at character: Int) -> NSRect? {
         guard !markdownEnabled || isPreview else { return nil }
         guard !codeRanges.contains(where: { NSLocationInRange(character, $0) }) else { return nil }
@@ -1051,9 +1206,10 @@ final class ChecklistNSTextView: NSTextView {
         let glyph = layoutManager.glyphIndexForCharacter(at: character)
         let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
         let baseline = lineRect.minY + layoutManager.location(forGlyphAt: glyph).y
-        let size = ChecklistMarkGeometry.boxSize(font: noteFont)
+        let font = taskFont(at: character)
+        let size = ChecklistMarkGeometry.boxSize(font: font)
         return NSRect(x: textContainerOrigin.x + textContainer.lineFragmentPadding,
-                      y: textContainerOrigin.y + baseline - ChecklistMarkGeometry.baselineOffset(font: noteFont) - size / 2, width: size, height: size)
+                      y: textContainerOrigin.y + baseline - ChecklistMarkGeometry.baselineOffset(font: font) - size / 2, width: size, height: size)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1089,8 +1245,15 @@ final class ChecklistNSTextView: NSTextView {
                    let checkbox = checkboxRect(at: line.location), checkbox.insetBy(dx: -3, dy: -3).contains(point) {
                     let lineText = (string as NSString).substring(with: line)
                     let contentRange = NSRange(location: line.location, length: line.length - (lineText.hasSuffix("\n") ? 1 : 0))
+                    if !markdownEnabled, !lineText.contains("~~") {
+                        let selection = selectedRange()
+                        insertText(prefix == "- [x] " ? " " : "x", replacementRange: NSRange(location: line.location + 3, length: 1))
+                        setSelectedRange(selection)
+                        return
+                    }
                     if let replacement = ChecklistLine.toggled((string as NSString).substring(with: contentRange)) {
-                        textStorage?.replaceCharacters(in: contentRange, with: replacement); didChangeText(); return
+                        insertText(replacement, replacementRange: contentRange)
+                        return
                     }
                 }
             }
@@ -1122,6 +1285,108 @@ final class ChecklistNSTextView: NSTextView {
         super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
     }
 
+    func richData() -> Data? {
+        guard let storage = textStorage else { return nil }
+        let clean = NSMutableAttributedString(attributedString: storage)
+        // Display-only checklist markers must never become tiny text in the saved rich document.
+        clean.enumerateAttribute(.font, in: NSRange(location: 0, length: clean.length)) { value, range, _ in
+            if (value as? NSFont)?.pointSize ?? 0 < 1 { clean.addAttributes(self.normalTypingAttributes, range: range) }
+        }
+        return try? clean.data(from: NSRange(location: 0, length: clean.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+    }
+
+    func loadRichText(_ data: Data?, baseSize: CGFloat? = nil) {
+        guard !markdownEnabled else { return }
+        hasRichFormatting = false
+        textStorage?.setAttributes(normalTypingAttributes, range: NSRange(location: 0, length: (string as NSString).length))
+        guard let rich = NoteMarkdown.normalizedRichText(data, matching: string, font: noteFont, baseSize: baseSize) else { return }
+        hasRichFormatting = true
+        textStorage?.setAttributedString(rich)
+        typingAttributes = normalTypingAttributes
+    }
+
+    private func restoreFormatting(_ text: NSAttributedString, selection: NSRange) {
+        guard let storage = textStorage else { return }
+        let previous = NSAttributedString(attributedString: storage)
+        let previousSelection = selectedRange()
+        undoManager?.registerUndo(withTarget: self) { $0.restoreFormatting(previous, selection: previousSelection) }
+        storage.setAttributedString(text)
+        setSelectedRange(selection)
+        didChangeText()
+    }
+
+    @objc func boldSelection(_ sender: Any?) { format(trait: .boldFontMask) }
+    @objc func italicSelection(_ sender: Any?) { format(trait: .italicFontMask) }
+
+    func format(trait: NSFontTraitMask? = nil, heading: Int? = nil) {
+        window?.makeFirstResponder(self)
+        if markdownEnabled {
+            beginSourceEditing()
+            let range = selectedRange()
+            let text = string as NSString
+            if let heading {
+                let lines = text.lineRange(for: range)
+                let source = text.substring(with: lines)
+                let replacement = source.components(separatedBy: "\n").enumerated().map { index, line in
+                    if line.isEmpty && index > 0 { return line }
+                    let body = line.replacingOccurrences(of: #"^#{1,6} "#, with: "", options: .regularExpression)
+                    return String(repeating: "#", count: heading) + (heading == 0 ? "" : " ") + body
+                }.joined(separator: "\n")
+                insertText(replacement, replacementRange: lines)
+            } else {
+                let marker = trait == .boldFontMask ? "**" : "*"
+                let selected = text.substring(with: range)
+                if range.location >= marker.count, NSMaxRange(range) + marker.count <= text.length,
+                   text.substring(with: NSRange(location: range.location - marker.count, length: marker.count)) == marker,
+                   text.substring(with: NSRange(location: NSMaxRange(range), length: marker.count)) == marker {
+                    insertText(selected, replacementRange: NSRange(location: range.location - marker.count, length: range.length + marker.count * 2))
+                    setSelectedRange(NSRange(location: range.location - marker.count, length: range.length))
+                } else {
+                    insertText(marker + selected + marker, replacementRange: range)
+                    setSelectedRange(NSRange(location: range.location + marker.count, length: range.length))
+                }
+            }
+            return
+        }
+        guard let storage = textStorage else { return }
+        hasRichFormatting = true
+        let range = selectedRange()
+        let manager = NSFontManager.shared
+        let current = (range.length > 0 ? storage.attribute(.font, at: range.location, effectiveRange: nil) : typingAttributes[.font]) as? NSFont ?? noteFont
+        var fonts = [NSFont]()
+        if range.length > 0 {
+            storage.enumerateAttribute(.font, in: range) { value, _, _ in
+                let font = value as? NSFont ?? self.noteFont
+                if font.pointSize >= 1 { fonts.append(font) }
+            }
+        } else { fonts = [current] }
+        let remove = trait.map { trait in !fonts.isEmpty && fonts.allSatisfy { manager.traits(of: $0).contains(trait) } } ?? false
+        func converted(_ font: NSFont) -> NSFont {
+            if let heading {
+                return heading == 0 ? noteFont : .systemFont(ofSize: noteFont.pointSize * [1, 1.65, 1.4, 1.2][heading], weight: .semibold)
+            }
+            return remove ? manager.convert(font, toNotHaveTrait: trait!) : NoteMarkdown.adding(trait!, to: font)
+        }
+        if range.length == 0 { typingAttributes[.font] = converted(current); return }
+        let formatted = NSMutableAttributedString(attributedString: storage)
+        formatted.enumerateAttribute(.font, in: range) { value, run, _ in
+            formatted.addAttribute(.font, value: converted(value as? NSFont ?? self.noteFont), range: run)
+        }
+        restoreFormatting(formatted, selection: range)
+        undoManager?.setActionName("Format Text")
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "b": boldSelection(nil); return true
+            case "i": italicSelection(nil); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func cancelOperation(_ sender: Any?) { cancelled?() }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { cancelled?(); return }
@@ -1131,7 +1396,7 @@ final class ChecklistNSTextView: NSTextView {
 }
 
 struct ChecklistMarkGeometry {
-    static func baselineOffset(font: NSFont) -> CGFloat { (font.ascender + font.descender) / 2 }
+    static func baselineOffset(font: NSFont) -> CGFloat { font.capHeight / 2 }
     static func boxSize(font: NSFont) -> CGFloat { max(10, min(18, (font.pointSize * 0.75).rounded())) }
 
     static func points(in rect: NSRect) -> (start: NSPoint, middle: NSPoint, end: NSPoint) {
@@ -1150,22 +1415,25 @@ final class ChecklistEditorHandle: ObservableObject {
 
 struct ChecklistTextEditor: NSViewRepresentable {
     @Binding var text: String
+    @Binding var richText: Data?
     let font: NSFont
-    var markdownEnabled = true
+    var richTextBaseSize: CGFloat? = nil
+    var markdownEnabled = false
     var previewDelay: Double = 5
     let cancel: () -> Void
     let handle: ChecklistEditorHandle
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false; scroll.scrollerStyle = .overlay; scroll.autohidesScrollers = true; scroll.verticalScroller?.controlSize = .small
-        let view = ChecklistNSTextView(); view.drawsBackground = false; view.isRichText = false; view.allowsUndo = true; view.usesFindPanel = true; view.isIncrementalSearchingEnabled = true; view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
+        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false; scroll.scrollerStyle = .overlay; scroll.autohidesScrollers = true; scroll.verticalScroller?.controlSize = .mini; scroll.scrollerKnobStyle = .dark; scroll.verticalScroller?.appearance = NSAppearance(named: .aqua)
+        let view = ChecklistNSTextView(); view.drawsBackground = false; view.isRichText = !markdownEnabled; view.importsGraphics = false; view.allowsUndo = true; view.usesFindPanel = true; view.isIncrementalSearchingEnabled = true; view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
         view.isContinuousSpellCheckingEnabled = true; view.isGrammarCheckingEnabled = true
         view.isAutomaticSpellingCorrectionEnabled = true
         view.minSize = .zero; view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         view.isHorizontallyResizable = false
         view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         view.focusRingType = .none; view.textContainerInset = NSSize(width: 0, height: 8); view.textContainer?.widthTracksTextView = true; view.isVerticallyResizable = true; view.autoresizingMask = [.width]
-        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.previewDelay = previewDelay; view.string = text; view.applyStyle(); view.cancelled = cancel; view.changed = { value in if value != text { text = value } }
+        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.previewDelay = previewDelay; view.string = text; view.loadRichText(richText, baseSize: richTextBaseSize); view.applyStyle(); view.cancelled = cancel; view.changed = { value in if value != text { text = value } }
+        view.richChanged = { richText = $0 }
         handle.view = view
         scroll.documentView = view
         view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
@@ -1178,10 +1446,44 @@ struct ChecklistTextEditor: NSViewRepresentable {
         let fontChanged = view.noteFont.fontName != font.fontName || view.noteFont.pointSize != font.pointSize
         let textChanged = view.string != text
         let markdownChanged = view.markdownEnabled != markdownEnabled
-        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.previewDelay = previewDelay; view.cancelled = cancel
+        view.noteFont = font; view.markdownEnabled = markdownEnabled; view.isRichText = !markdownEnabled; view.previewDelay = previewDelay; view.cancelled = cancel
         if textChanged { view.string = text }
+        if textChanged || markdownChanged { view.loadRichText(richText, baseSize: richTextBaseSize) }
         if markdownChanged && markdownEnabled { view.showPreview() }
         if textChanged || fontChanged || markdownChanged { view.applyStyle(); view.needsDisplay = true }
+    }
+}
+
+private struct NoteIconPicker: View {
+    @Binding var selection: String
+    let options: [String]
+    let label: String
+    @State private var showing = false
+
+    var body: some View {
+        Button { showing.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: selection).font(.system(size: 14))
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+            }.frame(height: 26).padding(.horizontal, 4).contentShape(Rectangle())
+        }
+        .buttonStyle(HoverButtonStyle()).accessibilityLabel(label)
+        .popover(isPresented: $showing, arrowEdge: .bottom) {
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(34), spacing: 6), count: options.count > 6 ? 4 : 3), spacing: 6) {
+                ForEach(options, id: \.self) { symbol in
+                    Button { selection = symbol; showing = false } label: {
+                        Image(systemName: symbol).font(.system(size: 16))
+                            .frame(width: 34, height: 34)
+                            .foregroundStyle(selection == symbol ? appAccentForeground : Color.primary)
+                            .background(selection == symbol ? appAccent : .clear, in: RoundedRectangle(cornerRadius: 7))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(HoverButtonStyle())
+                    .accessibilityLabel(symbol.replacingOccurrences(of: ".", with: " "))
+                    .accessibilityValue(selection == symbol ? "Selected" : "Not selected")
+                }
+            }.frame(width: options.count > 6 ? 154 : 114).padding(10)
+        }
     }
 }
 
@@ -1216,6 +1518,7 @@ struct NoteEditorView: View {
                 }
                 .buttonStyle(.plain).onHover { closeHovered = $0 }.animation(.easeOut(duration: 0.10), value: closeHovered)
                 .accessibilityLabel("Close note").help("Close this note and return to the deck")
+                NoteIconPicker(selection: Binding(get: { note.symbol }, set: { setIcon($0) }), options: NoteIcons.all, label: "Choose note icon")
                 TextField("Untitled note", text: $note.title).textFieldStyle(.plain).font(.system(size: 16, weight: .semibold))
                 Spacer()
                 Text("Saved · \(shortAge(note.updatedAt))").font(.system(size: 11)).foregroundStyle(.black.opacity(0.42))
@@ -1234,15 +1537,30 @@ struct NoteEditorView: View {
             }
             .padding(.horizontal, 16).frame(height: 47)
             Divider().opacity(0.22).padding(.horizontal, 16)
-            ChecklistTextEditor(text: $note.body, font: settings.nsNoteFont, markdownEnabled: settings.markdownEnabled, previewDelay: settings.markdownPreviewDelay, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
+            ChecklistTextEditor(text: $note.body, richText: Binding(get: { note.presentation?.richText }, set: { data in
+                if note.presentation == nil { note.presentation = NotePresentation() }
+                note.presentation?.richText = data
+                note.presentation?.richTextBaseSize = settings.textSize
+                save()
+            }), font: settings.nsNoteFont, richTextBaseSize: note.presentation?.richTextBaseSize.map { CGFloat($0) }, markdownEnabled: settings.markdownEnabled, previewDelay: settings.markdownPreviewDelay, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
             Divider().opacity(0.2)
             HStack(spacing: 8) {
-                ForEach(NoteColor.allCases, id: \.rawValue) { value in
-                    Button { note.color = value; save(immediate: true) } label: {
-                        RoundedRectangle(cornerRadius: 6).fill(value.color).frame(width: 20, height: 20)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(colorScheme == .dark ? .white.opacity(note.color == value ? 0.72 : 0) : .black.opacity(note.color == value ? 0.48 : 0), lineWidth: 2).padding(-2))
-                    }.buttonStyle(HoverButtonStyle()).help("\(value.name) color")
-                }
+                Menu {
+                    ForEach(NoteColor.allCases, id: \.rawValue) { value in
+                        Button(value.name) { note.color = value; note.presentation?.colorHex = nil; save(immediate: true) }
+                    }
+                } label: { Image(systemName: "paintpalette").frame(width: 22, height: 24) }
+                .menuStyle(.borderlessButton).fixedSize().help("Note color presets")
+                Menu {
+                    Button("Bold    ⌘B") { checklistEditor.view?.boldSelection(nil) }
+                    Button("Italic    ⌘I") { checklistEditor.view?.italicSelection(nil) }
+                    Divider()
+                    Button("Body") { checklistEditor.view?.format(heading: 0) }
+                    ForEach(1...3, id: \.self) { level in
+                        Button("Heading \(level)") { checklistEditor.view?.format(heading: level) }
+                    }
+                } label: { Image(systemName: "textformat.size").frame(width: 22, height: 24) }
+                .menuStyle(.borderlessButton).fixedSize().help("Format selected text").accessibilityLabel("Text formatting")
                 Button(action: checklistEditor.insertItem) {
                     Image(systemName: "checklist").frame(width: 25, height: 25)
                 }
@@ -1251,20 +1569,32 @@ struct NoteEditorView: View {
                 Button("Delete", role: .destructive, action: delete).buttonStyle(MatteButtonStyle(fill: .red.opacity(0.13), foreground: Color(red: 0.62, green: 0.08, blue: 0.06), width: 58)).fixedSize()
                 Button("Mark complete", action: archive).buttonStyle(MatteButtonStyle(fill: .black.opacity(0.15), foreground: .black.opacity(0.78), width: 100)).fixedSize()
                 Button("Close", action: close).buttonStyle(MatteButtonStyle(fill: .black.opacity(0.10), foreground: .black.opacity(0.78), width: 53)).fixedSize()
-                Button("") { cycleColor() }.keyboardShortcut(".", modifiers: .command).frame(width: 0, height: 0).opacity(0)
-                Button("") { delete() }.keyboardShortcut(.delete, modifiers: .command).frame(width: 0, height: 0).opacity(0)
             }
             .padding(.horizontal, 16).frame(height: 51)
+            .environment(\.colorScheme, .light)
+            .background {
+                Group {
+                    Button("") { cycleColor() }.keyboardShortcut(".", modifiers: .command)
+                    Button("") { delete() }.keyboardShortcut(.delete, modifiers: .command)
+                }.frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
+            }
         }
         .foregroundStyle(.black.opacity(0.73))
-        .background(note.color.color, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(note.displayColor, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onChange(of: note.title) { _ in save() }
         .onChange(of: note.body) { _ in save() }
         .onChange(of: store.notes) { _ in if let fresh = store.note(noteID), fresh.updatedAt > note.updatedAt { note = fresh } }
         .onExitCommand(perform: close)
     }
 
+    private func setIcon(_ symbol: String) {
+        if note.presentation == nil { note.presentation = NotePresentation() }
+        note.presentation?.icon = symbol
+        save(immediate: true)
+    }
+
     private func cycleColor() {
+        note.presentation?.colorHex = nil
         note.color = note.color.next
         save(immediate: true)
     }
@@ -1377,9 +1707,9 @@ struct AllNotesView: View {
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.primary.opacity(selected.contains(note.id) ? 0 : 0.22), lineWidth: 1.5))
                     .overlay(Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(appAccentForeground).opacity(selected.contains(note.id) ? 1 : 0))
             }.buttonStyle(HoverButtonStyle()).accessibilityLabel(selected.contains(note.id) ? "Deselect \(note.title)" : "Select \(note.title)")
-            Capsule().fill(note.color.color).frame(width: 4, height: 36)
+            Capsule().fill(note.displayColor).frame(width: 4, height: 36)
             VStack(alignment: .leading, spacing: 4) {
-                HStack { Text(note.title).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(note.archivedAt == nil ? "ACTIVE" : "ARCHIVED").font(.system(size: 9, weight: .medium)).padding(.horizontal, 6).padding(.vertical, 3).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5)); Text(shortAge(note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
+                HStack { Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(note.archivedAt == nil ? "ACTIVE" : "ARCHIVED").font(.system(size: 9, weight: .medium)).padding(.horizontal, 6).padding(.vertical, 3).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5)); Text(shortAge(note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
                 ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
             }
@@ -1392,7 +1722,7 @@ struct AllNotesView: View {
     private func previewPane(_ note: Note) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                RoundedRectangle(cornerRadius: 3).fill(note.color.color).frame(width: 9, height: 9)
+                RoundedRectangle(cornerRadius: 3).fill(note.displayColor).frame(width: 9, height: 9)
                 Text(note.archivedAt == nil ? "ACTIVE · IN\nTHE DECK" : "ARCHIVED · \(shortAge(note.archivedAt!).uppercased())")
                     .font(.system(size: 10, weight: .semibold)).tracking(0.7).foregroundStyle(.secondary)
                 Spacer()
@@ -1438,7 +1768,7 @@ struct AllNotesView: View {
                     Text(note.body).font(.system(size: 9)).lineLimit(2).foregroundStyle(.black.opacity(0.62))
                 }
                 .padding(10).frame(width: 150, height: 80, alignment: .topLeading)
-                .background(note.color.color, in: RoundedRectangle(cornerRadius: 11)).modifier(CardShadow())
+                .background(note.displayColor, in: RoundedRectangle(cornerRadius: 11)).modifier(CardShadow())
                 .offset(x: CGFloat(index) * 18, y: CGFloat(index) * 5)
             }
         }
@@ -1465,12 +1795,10 @@ struct NotePreview: View {
     var height: CGFloat = 336
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text(note.title).font(.system(size: 17, weight: .bold)); Spacer(); Text("edited \(note.updatedAt.formatted(.dateTime.day().month(.abbreviated)))").font(.caption).foregroundStyle(.black.opacity(0.46)) }
+            HStack { Label(note.title, systemImage: note.symbol).font(.system(size: 17, weight: .bold)); Spacer(); Text("edited \(note.updatedAt.formatted(.dateTime.day().month(.abbreviated)))").font(.caption).foregroundStyle(.black.opacity(0.46)) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 5) {
-                    ForEach(Array(note.body.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        ChecklistPreviewLine(line: line, font: settings.nsNoteFont)
-                    }
+                    Text(NoteMarkdown.preview(note, font: settings.nsNoteFont, markdown: settings.markdownEnabled))
                 }
                 .font(settings.noteFont).foregroundStyle(.black.opacity(0.72)).frame(maxWidth: .infinity, alignment: .topLeading)
             }
@@ -1479,7 +1807,7 @@ struct NotePreview: View {
         }
         .padding(20).frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
         .foregroundStyle(.black.opacity(0.76))
-        .background(note.color.color, in: RoundedRectangle(cornerRadius: 18)).modifier(CardShadow(lifted: true))
+        .background(note.displayColor, in: RoundedRectangle(cornerRadius: 18)).modifier(CardShadow(lifted: true))
     }
 
     private var metadata: String {
@@ -1543,7 +1871,7 @@ struct ArchiveView: View {
                 if let note = current {
                     VStack(alignment: .leading, spacing: 13) {
                         HStack {
-                            RoundedRectangle(cornerRadius: 3).fill(note.color.color).frame(width: 9, height: 9)
+                            RoundedRectangle(cornerRadius: 3).fill(note.displayColor).frame(width: 9, height: 9)
                             Text(archiveStatus(note)).font(.system(size: 10, weight: .semibold)).tracking(0.6).foregroundStyle(.secondary)
                             Spacer()
                             Button("Restore to deck") { store.restore(note.id) }.buttonStyle(MatteButtonStyle())
@@ -1563,9 +1891,9 @@ struct ArchiveView: View {
 
     private func archiveRow(_ note: Note) -> some View {
         HStack(spacing: 10) {
-            Capsule().fill(note.color.color).frame(width: 4, height: 36)
+            Capsule().fill(note.displayColor).frame(width: 4, height: 36)
             VStack(alignment: .leading, spacing: 4) {
-                HStack { Text(note.title).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(shortAge(note.archivedAt ?? note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
+                HStack { Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(shortAge(note.archivedAt ?? note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
                 ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
             }
@@ -1622,7 +1950,7 @@ enum ExportController {
     }
 }
 
-private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", appearance = "Appearance", shortcuts = "Keyboard", system = "System", cloud = "Cloud Sync", about = "About" }
+private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", appearance = "Appearance", calendar = "Calendar", shortcuts = "Keyboard", system = "System", cloud = "Cloud Sync", about = "About" }
 
 enum SettingsPalette {
     static func color(_ hex: UInt32) -> NSColor {
@@ -1834,6 +2162,7 @@ struct SettingsView: View {
     @State private var tab = SettingsTab.appearance
     @State private var previewIndex = 0
     @State private var screens = NSScreen.screens
+    @StateObject private var calendarAgenda = CalendarAgenda()
 
     static func visibleVersion(shortVersion: String) -> String { shortVersion }
 
@@ -1855,13 +2184,14 @@ struct SettingsView: View {
                 Text("margin").font(SettingsPalette.font(20, medium: true)).tracking(-0.7)
                 Spacer()
                 Text("Settings").font(SettingsPalette.font(11)).foregroundStyle(secondaryInk).frame(width: 90, alignment: .trailing)
-            }.padding(.horizontal, 24).frame(height: 54)
-            HStack(spacing: 28) {
+            }.padding(.horizontal, 24).frame(height: 44)
+            HStack(spacing: 24) {
                 ForEach(SettingsTab.allCases, id: \.self) { value in tabButton(value) }
             }
             .frame(maxWidth: .infinity).padding(.horizontal, 20)
             .overlay(alignment: .bottom) { rule.frame(height: 1) }.padding(.horizontal, 25)
-                VStack(spacing: 18) {
+            Group {
+                VStack(spacing: 14) {
                     Group {
                         switch tab {
                         case .general: general
@@ -1870,32 +2200,37 @@ struct SettingsView: View {
                         case .shortcuts: shortcuts
                         case .system: system
                         case .appearance: appearance
+                        case .calendar: calendarSettings
                         case .about: about
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .top).fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    HStack {
-                        Text("Margin \(versionText)")
-                        Spacer()
-                        Text("Changes save automatically.")
-                    }
-                    .font(SettingsPalette.font(10)).foregroundStyle(secondaryInk)
-                    .padding(.top, 12).overlay(alignment: .top) { rule.frame(height: 1) }
+
                 }
-                .frame(maxWidth: 760).padding(.horizontal, 40).padding(.top, 22).padding(.bottom, 18)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+            HStack {
+                Text("Margin \(versionText)")
+                Spacer()
+                Text("Changes save automatically.")
+            }
+            .font(SettingsPalette.font(10)).foregroundStyle(secondaryInk)
+            .padding(.top, 10).overlay(alignment: .top) { rule.frame(height: 1) }
+            .padding(.horizontal, 28).padding(.bottom, 12)
         }
         .font(SettingsPalette.font(13)).foregroundStyle(SettingsPalette.ink)
-        .tint(accent).background(surface).ignoresSafeArea(.container, edges: .top)
+        .tint(accent).background(surface)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in screens = NSScreen.screens }
+        .onChange(of: settings.calendarVisibleIDs) { value in calendarAgenda.calendarIDs = value; calendarAgenda.refresh() }
+        .onChange(of: calendarAgenda.calendarIDs) { value in if settings.calendarVisibleIDs != value { settings.calendarVisibleIDs = value } }
     }
 
     private func tabButton(_ value: SettingsTab) -> some View {
         Button { tab = value } label: {
             Text(value.rawValue).font(SettingsPalette.font(12, medium: tab == value))
                 .foregroundStyle(tab == value ? SettingsPalette.ink : secondaryInk)
-                .padding(.top, 8).padding(.bottom, 17)
+                .padding(.top, 6).padding(.bottom, 10)
                 .overlay(alignment: .bottom) { Rectangle().fill(tab == value ? accent : .clear).frame(height: 2) }
                 .contentShape(Rectangle())
         }
@@ -1905,8 +2240,7 @@ struct SettingsView: View {
     }
 
     private var general: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            heading("General", "How the deck looks and behaves.")
+        VStack(alignment: .leading, spacing: 14) {
             settingsSection("Deck") {
                 settingRow("Screen side", "Which edge the deck lives on") { AccentSegmentedPicker(selection: $settings.side, options: [(.left, "Left"), (.right, "Right"), (.bottom, "Bottom")], accessibilityLabel: "Screen side", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
                 settingRow("Open a note", "Choose how to open a card in the deck") { AccentSegmentedPicker(selection: $settings.fanMode, options: [(.hover, "On hover"), (.click, "On click")], accessibilityLabel: "Open a note", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
@@ -1925,9 +2259,99 @@ struct SettingsView: View {
         }
     }
 
+    private var calendarSettings: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            settingsSection("Calendar wing") {
+                settingRow("Calendar wing", "Turn this off to remove the calendar completely") {
+                    Toggle("Calendar wing", isOn: $settings.calendarEnabled).toggleStyle(.switch).labelsHidden().tint(accent)
+                }
+                settingRow("Wing position", "Choose an end, or drag the wing directly between notes") {
+                    AccentSegmentedPicker(selection: $settings.calendarPosition,
+                                          options: [(0, "Top"), (Int.max, "Bottom")],
+                                          accessibilityLabel: "Calendar wing position",
+                                          accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark))
+                        .frame(width: 150, height: 30).disabled(!settings.calendarEnabled)
+                }
+                settingRow("Calendar color", "Used for the wing and calendar window", divider: false) {
+                    HStack(spacing: 4) {
+                        ForEach(NoteColor.allCases, id: \.rawValue) { value in
+                            swatch(value.color, selected: settings.calendarColor == value, label: "\(value.name) calendar color") {
+                                settings.calendarColor = value
+                            }
+                        }
+                    }
+                }
+            }
+            settingsSection("Calendar access") {
+                if calendarAgenda.authorized {
+                    settingRow("Calendars shown", "Choose one calendar or combine all connected accounts") {
+                        Menu {
+                            Button { settings.calendarVisibleIDs = [] } label: {
+                                if settings.calendarVisibleIDs.isEmpty { Label("All calendars", systemImage: "checkmark") }
+                                else { Text("All calendars") }
+                            }
+                            Divider()
+                            ForEach(calendarAgenda.calendars, id: \.calendarIdentifier) { calendar in
+                                Button { toggleCalendar(calendar.calendarIdentifier) } label: {
+                                    let name = "\(calendar.title) · \(calendar.source.title)"
+                                    if settings.calendarVisibleIDs.contains(calendar.calendarIdentifier) { Label(name, systemImage: "checkmark") }
+                                    else { Text(name) }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 7) {
+                                Text(calendarSelectionLabel).lineLimit(1)
+                                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                            }
+                        }.buttonStyle(SettingsButtonStyle()).frame(width: 220)
+                    }
+                    settingRow("Primary calendar", "New events save here unless you choose another calendar") {
+                        settingsMenu("Primary calendar", selection: $settings.calendarID, options: primaryCalendarOptions, width: 220)
+                    }
+                    settingRow("Connection", "Managed securely by macOS Calendar", divider: false) {
+                        Button("Open Calendar", action: CalendarAgenda.openCalendar).buttonStyle(SettingsButtonStyle())
+                    }
+                } else {
+                    settingRow("Calendar access", calendarAgenda.message) {
+                        Button(calendarAgenda.requesting ? "Waiting…" : "Allow Access") { calendarAgenda.requestAccess() }
+                            .buttonStyle(SettingsButtonStyle()).disabled(calendarAgenda.requesting)
+                    }
+                    settingRow("Privacy controls", "Change access later in System Settings", divider: false) {
+                        Button("Open System Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")!)
+                        }.buttonStyle(SettingsButtonStyle())
+                    }
+                }
+            }
+        }
+        .onAppear {
+            calendarAgenda.calendarIDs = settings.calendarVisibleIDs; calendarAgenda.refresh()
+            if !primaryCalendarOptions.contains(where: { $0.0 == settings.calendarID }) {
+                settings.calendarID = primaryCalendarOptions.first?.0 ?? ""
+            }
+        }
+    }
+
+    private var calendarSelectionLabel: String {
+        if settings.calendarVisibleIDs.isEmpty { return "All calendars" }
+        if settings.calendarVisibleIDs.count == 1 {
+            return calendarAgenda.calendars.first { $0.calendarIdentifier == settings.calendarVisibleIDs[0] }?.title ?? "1 calendar"
+        }
+        return "\(settings.calendarVisibleIDs.count) calendars"
+    }
+
+    private var primaryCalendarOptions: [(String, String)] {
+        calendarAgenda.writableCalendars.map { ($0.calendarIdentifier, "\($0.title) · \($0.source.title)") }
+    }
+
+    private func toggleCalendar(_ id: String) {
+        if settings.calendarVisibleIDs.isEmpty { settings.calendarVisibleIDs = [id] }
+        else if settings.calendarVisibleIDs.contains(id) { settings.calendarVisibleIDs.removeAll { $0 == id } }
+        else { settings.calendarVisibleIDs.append(id) }
+    }
+
     private var notes: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            heading("Notes", "Writing, formatting, and sharing.")
+        VStack(alignment: .leading, spacing: 14) {
             settingsSection("Markdown & sharing") {
                 settingRow("Markdown formatting", "Use headings, emphasis, lists, links and code in notes") {
                     Toggle("Markdown formatting", isOn: $settings.markdownEnabled).toggleStyle(.switch).labelsHidden()
@@ -1948,7 +2372,6 @@ struct SettingsView: View {
 
     private var shortcuts: some View {
         VStack(alignment: .leading, spacing: 16) {
-            heading("Keyboard", "Click a shortcut, then press a new key combination. Escape cancels.")
             settingsSection("Shortcuts") {
                 ForEach(KeyboardAction.allCases, id: \.rawValue) { action in
                     HStack {
@@ -1977,8 +2400,7 @@ struct SettingsView: View {
     }
 
     private var cloud: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            heading("Cloud Sync", "Keep your notes on every Mac you use.")
+        VStack(alignment: .leading, spacing: 14) {
             settingsSection("Sync") {
                 settingRow("Sync my notes", "Use a folder in iCloud Drive or another syncing service", divider: settings.cloudSyncEnabled) {
                     Toggle("Sync my notes", isOn: Binding(
@@ -2010,8 +2432,7 @@ struct SettingsView: View {
     }
 
     private var system: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            heading("System", "Control how Margin behaves on your Mac.")
+        VStack(alignment: .leading, spacing: 14) {
             settingsSection("Windows") {
                 settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(accent) }
                 settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(accent) }
@@ -2021,11 +2442,13 @@ struct SettingsView: View {
     }
 
     private var appearance: some View {
-        VStack(spacing: 20) {
-            heading("Appearance", "The way Margin looks on your Mac.")
+        VStack(spacing: 14) {
+            settingRow("Menu bar icon", "Choose the symbol shown in the macOS menu bar") {
+                NoteIconPicker(selection: $settings.menuBarIcon, options: NoteIcons.menuBar, label: "Choose menu bar icon")
+            }
             notePreview
-            HStack(alignment: .top, spacing: 46) {
-                VStack(alignment: .leading, spacing: 24) {
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Theme").font(SettingsPalette.font(13, medium: true))
                         HStack(spacing: 12) {
@@ -2050,7 +2473,7 @@ struct SettingsView: View {
                     HStack {
                         Text("New note color").font(SettingsPalette.font(13, medium: true))
                         Spacer()
-                        Text(settings.useDefaultColor ? settings.defaultColor.name : "Cycle palette")
+                        Text(settings.useDefaultColor ? (settings.defaultColorHex == nil ? settings.defaultColor.name : "Custom") : "Cycle palette")
                             .font(SettingsPalette.font(11)).foregroundStyle(secondaryInk)
                     }.padding(.bottom, 10)
                     HStack(spacing: 10) {
@@ -2063,12 +2486,21 @@ struct SettingsView: View {
                         }.buttonStyle(.plain).help("Cycle through the palette for each new note")
                             .accessibilityLabel("Cycle new note colors").accessibilityValue(!settings.useDefaultColor ? "Selected" : "Not selected")
                         ForEach(NoteColor.allCases, id: \.rawValue) { value in
-                        swatch(value.color, selected: settings.useDefaultColor && settings.defaultColor == value,
+                        swatch(value.color, selected: settings.useDefaultColor && settings.defaultColorHex == nil && settings.defaultColor == value,
                                label: "\(value.name) default note color") {
-                            settings.defaultColor = value; settings.useDefaultColor = true
+                            settings.defaultColor = value; settings.defaultColorHex = nil; settings.useDefaultColor = true
                         }
                     } }
-                    Text(settings.useDefaultColor ? "Each new note starts in \(settings.defaultColor.name.lowercased())." : "Each new note gets the next color in the palette.")
+                    ColorPicker("Custom note color", selection: Binding(get: {
+                        guard let hex = settings.defaultColorHex else { return settings.defaultColor.color }
+                        return Color(red: Double((hex >> 16) & 255) / 255, green: Double((hex >> 8) & 255) / 255, blue: Double(hex & 255) / 255)
+                    }, set: { color in
+                        guard let rgb = NSColor(color).usingColorSpace(.sRGB) else { return }
+                        settings.defaultColorHex = UInt32((rgb.redComponent * 255).rounded()) << 16 | UInt32((rgb.greenComponent * 255).rounded()) << 8 | UInt32((rgb.blueComponent * 255).rounded())
+                        settings.useDefaultColor = true
+                    }), supportsOpacity: false)
+                    .font(SettingsPalette.font(12)).padding(.top, 12)
+                    Text(settings.useDefaultColor ? (settings.defaultColorHex == nil ? "Each new note starts in \(settings.defaultColor.name.lowercased())." : "New notes use a soft tint of your custom color.") : "Each new note gets the next color in the palette.")
                         .font(SettingsPalette.font(11)).foregroundStyle(secondaryInk).padding(.top, 9)
                     compactRow("Note typeface") {
                         settingsMenu("Note typeface", selection: $settings.fontName,
@@ -2130,7 +2562,7 @@ struct SettingsView: View {
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(.top, 24)
         }
-        .frame(height: 215).clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(height: 164).clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private func previewNote(_ index: Int) -> some View {
@@ -2138,6 +2570,7 @@ struct SettingsView: View {
         let left = index == (previewIndex + 1) % 3
         let content = Self.previewContent(notes: store.active, locked: settings.lockNotes, index: index)
         let noteColor = settings.useDefaultColor ? settings.defaultColor : NoteColor.allCases[(store.nextNoteColor.rawValue + index) % NoteColor.allCases.count]
+        let previewColor = Note(color: noteColor, presentation: settings.useDefaultColor ? settings.defaultColorHex.map { NotePresentation(colorHex: $0) } : nil).displayColor
         return Button {
             withAnimation(reduceMotion ? nil : .timingCurve(0.22, 1, 0.36, 1, duration: 0.5)) { previewIndex = index }
         } label: {
@@ -2155,10 +2588,10 @@ struct SettingsView: View {
             }
             .foregroundStyle(.black.opacity(0.73))
             .frame(width: 400, height: 244, alignment: .topLeading)
-            .background(noteColor.color, in: RoundedRectangle(cornerRadius: 20))
+            .background(previewColor, in: RoundedRectangle(cornerRadius: 20))
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .shadow(color: .black.opacity(0.09), radius: 12, y: 8)
-            .scaleEffect(0.68).frame(width: 272, height: 166)
+            .scaleEffect(0.52).frame(width: 208, height: 127)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -2181,12 +2614,11 @@ struct SettingsView: View {
             Text(title).font(SettingsPalette.font(13, medium: true))
             Spacer(minLength: 8)
             trailing().controlSize(.small)
-        }.padding(.top, 13).padding(.bottom, 2).overlay(alignment: .top) { rule.frame(height: 1) }.padding(.top, 13)
+        }.padding(.top, 8).overlay(alignment: .top) { rule.frame(height: 1) }.padding(.top, 8)
     }
 
     private var about: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            heading("About", "Margin")
+        VStack(alignment: .leading, spacing: 14) {
             settingsSection("Application") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 14) {
@@ -2211,7 +2643,25 @@ struct SettingsView: View {
                     Button("Check Now") { updater.checkForUpdates() }.buttonStyle(SettingsButtonStyle()).fixedSize()
                 }
             }
+            settingsSection("Privacy & legal") {
+                HStack(spacing: 12) {
+                    Button("Privacy policy") { openLegal("PRIVACY") }
+                    Button("License & use") { openLegal("TERMS") }
+                    Menu("More documents") {
+                        Button("Data deletion & backups") { openLegal("DATA-DELETION") }
+                        Button("Security policy") { openLegal("SECURITY") }
+                        Button("Third-party notices") { openLegal("THIRD-PARTY-NOTICES") }
+                        Button("MIT License") { openLegal("LICENSE") }
+                    }.menuStyle(.borderlessButton).fixedSize()
+                }.buttonStyle(SettingsButtonStyle())
+            }
         }
+    }
+
+    private func openLegal(_ name: String) {
+        if let url = Bundle.main.url(forResource: name, withExtension: "html", subdirectory: "Legal") {
+            NSWorkspace.shared.open(url)
+        } else { store.errorMessage = "The legal document is missing from this build." }
     }
 
     private var versionText: String {
@@ -2219,27 +2669,20 @@ struct SettingsView: View {
         return Self.visibleVersion(shortVersion: version)
     }
 
-    private func heading(_ title: String, _ subtitle: String) -> some View {
-        VStack(spacing: 7) {
-            Text(title).font(SettingsPalette.font(30, medium: true)).tracking(-0.8)
-            Text(subtitle).font(SettingsPalette.font(12)).foregroundStyle(secondaryInk)
-        }.frame(maxWidth: .infinity).multilineTextAlignment(.center)
-    }
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(SettingsPalette.font(13, medium: true)).padding(.bottom, 7)
             content()
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(maxWidth: .infinity, alignment: .leading).accessibilityLabel(title)
     }
     private func settingRow<Trailing: View>(_ title: String, _ subtitle: String, divider: Bool = true, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 24) {
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(SettingsPalette.font(13, medium: true))
                 Text(subtitle).font(SettingsPalette.font(12)).foregroundStyle(secondaryInk).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
             trailing().fixedSize().controlSize(.small)
-        }.padding(.vertical, 12).overlay(alignment: .bottom) { rule.frame(height: divider ? 1 : 0) }
+        }.padding(.vertical, 6).overlay(alignment: .bottom) { rule.frame(height: divider ? 1 : 0) }
     }
 
     private func settingsMenu<Value: Hashable>(_ title: String, selection: Binding<Value>, options: [(Value, String)], width: CGFloat) -> some View {

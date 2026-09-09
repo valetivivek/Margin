@@ -28,7 +28,7 @@ fi
 rm -rf "$APP"
 mkdir -p "$CACHE" "$APP/Contents/MacOS" "$APP/Contents/Resources/Fonts" "$APP/Contents/Frameworks" "$ROOT/.build/bin"
 sources=("$ROOT"/Sources/**/*.swift(N))
-common=(-sdk "$SDK" -swift-version 5 -O -F "${SPARKLE_FRAMEWORK:h}" -framework Sparkle -framework AppKit -framework SwiftUI -framework Combine -framework CryptoKit -framework Security -framework LocalAuthentication -framework ServiceManagement -framework Carbon -Xlinker -rpath -Xlinker @executable_path/../Frameworks -lsqlite3)
+common=(-sdk "$SDK" -swift-version 5 -O -F "${SPARKLE_FRAMEWORK:h}" -framework Sparkle -framework AppKit -framework EventKit -framework SwiftUI -framework Combine -framework CryptoKit -framework Security -framework LocalAuthentication -framework ServiceManagement -framework Carbon -Xlinker -rpath -Xlinker @executable_path/../Frameworks -lsqlite3)
 
 for arch in arm64 x86_64; do
   CLANG_MODULE_CACHE_PATH="$CACHE" "$SWIFTC" "${common[@]}" -target "$arch-apple-macos13.0" "${sources[@]}" -o "$ROOT/.build/bin/Margin-$arch"
@@ -36,6 +36,7 @@ done
 
 lipo -create "$ROOT/.build/bin/Margin-arm64" "$ROOT/.build/bin/Margin-x86_64" -output "$APP/Contents/MacOS/Margin"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+python3 "$ROOT/scripts/package-legal.py" "$APP/Contents/Resources/Legal"
 cp -R "$ROOT/Resources/Fonts/." "$APP/Contents/Resources/Fonts/"
 cp "$SPARKLE_ROOT/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
@@ -57,6 +58,7 @@ codesign --verify --deep --strict "$APP"
 mkdir -p "$ROOT/dist"
 ditto "$APP" "$STAGE/Margin.app"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
+cp "$ROOT/PRIVACY.md" "$ROOT/TERMS.md" "$ROOT/DATA-DELETION.md" "$ROOT/THIRD-PARTY-NOTICES.md" "$ROOT/SECURITY.md" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -ov -format UDZO -volname "Margin $VERSION" -srcfolder "$STAGE" "$OUTPUT"
 hdiutil verify "$OUTPUT"

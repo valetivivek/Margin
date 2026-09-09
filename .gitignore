@@ -1,5 +1,6 @@
 .build/
 build/
 dist/
+Resources/Legal/
 .DS_Store
 *.xcuserstate

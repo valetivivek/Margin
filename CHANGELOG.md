@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.0 - 2026-09-08
+
+Margin 1.3.0 adds a full calendar wing, native rich-text formatting, automatic bullets, note colors and icons, and a tighter Settings layout.
+
+### Calendar wing
+
+- Added a movable, resizable full-month calendar that opens from its own deck wing.
+- Display events from multiple iCloud, Google, Exchange, or other accounts connected through macOS Calendar.
+- Choose a primary calendar for new events, or select another destination while adding or editing an event.
+- Add, edit, move, and delete events through EventKit; macOS handles synchronization with the connected provider.
+- Place the wing at the top or bottom, drag it between notes, turn it off completely, and choose its color in Settings.
+- Kept the calendar out of the collapsed capsule, removed its dark outer border, and added a confirmed delete action.
+
+### Writing and note appearance
+
+- Markdown is off by default. Command-B and Command-I now toggle native bold and italic formatting without inserting Markdown markers.
+- Added Body and Heading 1–3 formatting for selected text, with persistent rich-text storage.
+- Typing `-` followed by Space creates a bullet; Enter continues the list and a second Enter ends it without shrinking the text.
+- Corrected checklist checkbox baselines, hanging indentation, bullet size, note font sizing, and dark-appearance text color.
+- Added note color presets, a custom new-note color picker in Settings, and symbol grids for notes and the menu bar.
+
+### Deck and Settings
+
+- Removed hover jitter and simplified the deck reveal motion while keeping card dragging smooth.
+- Brightened wing guide lines and refined the note action toolbar alignment and colors.
+- Reorganized Settings into equal-size, single-page tabs without scrollbars, oversized page headings, or redundant section labels.
+- Added bundled privacy, terms, data-deletion, security, license, and third-party notices for direct GitHub distribution.
+
+Requires macOS 13 or later. The universal DMG supports Apple silicon and Intel Macs. Calendar access is optional and managed by macOS; Cloud Sync remains paused.
+
 ## 1.2.1 - 2026-09-06
 
 Margin 1.2.1 refreshes Settings with a warm oyster palette, Satoshi typography, and a single page for each tab.

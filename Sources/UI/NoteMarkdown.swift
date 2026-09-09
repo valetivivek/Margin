@@ -44,6 +44,65 @@ struct NoteFile: Transferable {
 }
 
 enum NoteMarkdown {
+    static func adding(_ trait: NSFontTraitMask, to font: NSFont) -> NSFont {
+        let manager = NSFontManager.shared
+        let converted = manager.convert(font, toHaveTrait: trait)
+        guard !manager.traits(of: converted).contains(trait) else { return converted }
+        let traits = manager.traits(of: font).union(trait)
+        let fallback = NSFont.systemFont(ofSize: font.pointSize, weight: traits.contains(.boldFontMask) ? .bold : .regular)
+        return traits.contains(.italicFontMask) ? manager.convert(fallback, toHaveTrait: .italicFontMask) : fallback
+    }
+
+    static func matchingFont(_ source: NSFont, sourceBaseSize: CGFloat, targetFont: NSFont) -> NSFont {
+        guard source.pointSize >= 1, sourceBaseSize >= 1 else { return source }
+        let size = targetFont.pointSize * source.pointSize / sourceBaseSize
+        var result = NSFont(descriptor: targetFont.fontDescriptor, size: size) ?? .systemFont(ofSize: size)
+        let traits = NSFontManager.shared.traits(of: source)
+        if traits.contains(.boldFontMask) { result = adding(.boldFontMask, to: result) }
+        if traits.contains(.italicFontMask) { result = adding(.italicFontMask, to: result) }
+        return result
+    }
+
+    static func matchFonts(in text: NSMutableAttributedString, sourceBaseSize: CGFloat, targetFont: NSFont) {
+        let source = NSAttributedString(attributedString: text)
+        source.enumerateAttribute(.font, in: NSRange(location: 0, length: source.length)) { value, range, _ in
+            guard let font = value as? NSFont, font.pointSize >= 1 else { return }
+            text.addAttribute(.font, value: matchingFont(font, sourceBaseSize: sourceBaseSize, targetFont: targetFont), range: range)
+        }
+    }
+
+    static func normalizedRichText(_ data: Data?, matching string: String, font: NSFont, baseSize: CGFloat? = nil) -> NSMutableAttributedString? {
+        guard let data,
+              let source = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil),
+              source.string == string else { return nil }
+        let text = NSMutableAttributedString(attributedString: source)
+        var sizes: [CGFloat: Int] = [:]
+        source.enumerateAttribute(.font, in: NSRange(location: 0, length: source.length)) { value, range, _ in
+            guard let pointSize = (value as? NSFont)?.pointSize, pointSize >= 1 else { return }
+            sizes[(pointSize * 100).rounded() / 100, default: 0] += range.length
+        }
+        let sourceBaseSize = baseSize.flatMap { $0 >= 1 ? $0 : nil }
+            ?? sizes.max { lhs, rhs in lhs.value == rhs.value ? lhs.key > rhs.key : lhs.value < rhs.value }?.key
+            ?? font.pointSize
+        matchFonts(in: text, sourceBaseSize: sourceBaseSize, targetFont: font)
+        return text
+    }
+
+    static func preview(_ note: Note, font: NSFont, markdown: Bool) -> AttributedString {
+        if !markdown, let rich = normalizedRichText(note.presentation?.richText, matching: note.body, font: font,
+                                                    baseSize: note.presentation?.richTextBaseSize.map { CGFloat($0) }) {
+            let text = NSMutableAttributedString(attributedString: rich)
+            var markers: [(NSRange, Bool)] = []
+            (note.body as NSString).enumerateSubstrings(in: NSRange(location: 0, length: text.length), options: [.byLines]) { line, range, _, _ in
+                if let line, let task = ChecklistLine.parse(line) { markers.append((NSRange(location: range.location, length: 6), task.checked)) }
+            }
+            text.removeAttribute(.paragraphStyle, range: NSRange(location: 0, length: text.length))
+            for (range, checked) in markers.reversed() { text.replaceCharacters(in: range, with: checked ? "☑ " : "☐ ") }
+            return AttributedString(text)
+        }
+        return markdown ? preview(note.body, font: font) : AttributedString(note.body)
+    }
+
     static func preview(_ source: String, font: NSFont) -> AttributedString {
         let text = NSTextStorage(string: source, attributes: [.font: font, .foregroundColor: NSColor.black.withAlphaComponent(0.76)])
         let codeRanges = apply(to: text, font: font)
@@ -117,18 +176,8 @@ enum NoteMarkdown {
                 }
             }
             let inline = run.inlinePresentationIntent ?? []
-            if inline.contains(.stronglyEmphasized) {
-                face = NSFontManager.shared.convert(face, toHaveTrait: .boldFontMask)
-                if !NSFontManager.shared.traits(of: face).contains(.boldFontMask) {
-                    face = .systemFont(ofSize: face.pointSize, weight: .bold)
-                }
-            }
-            if inline.contains(.emphasized) {
-                face = NSFontManager.shared.convert(face, toHaveTrait: .italicFontMask)
-                if !NSFontManager.shared.traits(of: face).contains(.italicFontMask) {
-                    face = NSFontManager.shared.convert(.systemFont(ofSize: face.pointSize, weight: inline.contains(.stronglyEmphasized) ? .bold : .regular), toHaveTrait: .italicFontMask)
-                }
-            }
+            if inline.contains(.stronglyEmphasized) { face = adding(.boldFontMask, to: face) }
+            if inline.contains(.emphasized) { face = adding(.italicFontMask, to: face) }
             if inline.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
             if inline.contains(.code) {
                 face = .monospacedSystemFont(ofSize: font.pointSize * 0.9, weight: .regular)

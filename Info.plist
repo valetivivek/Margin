@@ -19,21 +19,27 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.1</string>
+    <string>1.3.0</string>
     <key>CFBundleVersion</key>
-    <string>7</string>
+    <string>8</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Show, add, edit, and delete calendar events through macOS Calendar.</string>
+    <key>NSCalendarsUsageDescription</key>
+	<string>Show, add, edit, and delete calendar events through macOS Calendar.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Unlock your private notes.</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUAutomaticallyUpdate</key>
     <true/>
+    <key>SUSendProfileInfo</key>
+    <false/>
     <key>SUFeedURL</key>
     <string>https://github.com/valetivivek/Margin/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>

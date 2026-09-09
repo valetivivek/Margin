@@ -66,6 +66,18 @@ struct GlobalShortcut: Codable, Equatable {
     }
 }
 
+struct NotePresentation: Codable, Equatable {
+    var colorHex: UInt32?
+    var icon: String?
+    var richText: Data?
+    var richTextBaseSize: Double?
+}
+
+enum NoteIcons {
+    static let menuBar = ["note.text", "square.stack", "pencil", "checklist", "book", "bookmark"]
+    static let all = ["note.text", "square.stack", "pencil", "checklist", "star", "heart", "lightbulb", "book", "bookmark", "briefcase", "house", "flag", "leaf", "bolt", "calendar", "cup.and.saucer"]
+}
+
 struct Note: Identifiable, Codable, Equatable {
     var id = UUID()
     var title = "Untitled note"
@@ -79,6 +91,7 @@ struct Note: Identifiable, Codable, Equatable {
     var sortIndex = 0.0
     var pinX: Double?
     var pinY: Double?
+    var presentation: NotePresentation?
 }
 
 final class AppSettings: ObservableObject {
@@ -93,8 +106,14 @@ final class AppSettings: ObservableObject {
     @Published var fontName: String { didSet { save("fontName", fontName) } }
     @Published var textSize: Double { didSet { save("textSize", textSize) } }
     @Published var animationSpeed: AnimationSpeed { didSet { save("animationSpeed", animationSpeed.rawValue) } }
+    @Published var calendarEnabled: Bool { didSet { save("calendarEnabled", calendarEnabled) } }
+    @Published var calendarPosition: Int { didSet { save("calendarPosition", calendarPosition) } }
+    @Published var calendarID: String { didSet { save("calendarID", calendarID) } }
+    @Published var calendarVisibleIDs: [String] { didSet { save("calendarVisibleIDs", calendarVisibleIDs) } }
+    @Published var calendarColor: NoteColor { didSet { save("calendarColor", calendarColor.rawValue) } }
     @Published var cloudSyncEnabled: Bool { didSet { save("cloudSyncEnabled", cloudSyncEnabled) } }
     @Published var cloudSyncBookmark: Data? { didSet { save("cloudSyncBookmark", cloudSyncBookmark) } }
+    @Published var menuBarIcon: String { didSet { save("menuBarIcon", menuBarIcon) } }
     @Published var showInDock: Bool { didSet { save("showInDock", showInDock) } }
     @Published var display: String { didSet { save("display", display) } }
     @Published var showOverFullScreen: Bool { didSet { save("showOverFullScreen", showOverFullScreen) } }
@@ -102,6 +121,7 @@ final class AppSettings: ObservableObject {
     @Published var appearance: AppearanceMode { didSet { save("appearance", appearance.rawValue) } }
     @Published var interfaceColor: InterfaceColor { didSet { save("interfaceColor", interfaceColor.rawValue) } }
     @Published var useDefaultColor: Bool { didSet { save("useDefaultColor", useDefaultColor) } }
+    @Published var defaultColorHex: UInt32? { didSet { save("defaultColorHex", defaultColorHex.map { Int($0) }) } }
     @Published var defaultColor: NoteColor { didSet { save("defaultColor", defaultColor.rawValue) } }
     @Published var shortcuts: [String: GlobalShortcut] { didSet { save("shortcuts", try? JSONEncoder().encode(shortcuts)) } }
     @Published var disabledShortcuts: [String] { didSet { save("disabledShortcuts", disabledShortcuts) } }
@@ -128,8 +148,17 @@ final class AppSettings: ObservableObject {
         fontName = defaults.string(forKey: "fontName") ?? "Helvetica"
         textSize = defaults.object(forKey: "textSize") as? Double ?? 21
         animationSpeed = AnimationSpeed(rawValue: defaults.string(forKey: "animationSpeed") ?? "normal") ?? .normal
+        calendarEnabled = defaults.bool(forKey: "calendarEnabled")
+        calendarPosition = defaults.object(forKey: "calendarPosition") as? Int
+            ?? ((defaults.object(forKey: "calendarFirst") as? Bool ?? true) ? 0 : Int.max)
+        let savedCalendarID = defaults.string(forKey: "calendarID") ?? ""
+        calendarID = savedCalendarID
+        calendarVisibleIDs = defaults.stringArray(forKey: "calendarVisibleIDs")
+            ?? (savedCalendarID.isEmpty ? [] : [savedCalendarID])
+        calendarColor = (defaults.object(forKey: "calendarColor") as? Int).flatMap(NoteColor.init(rawValue:)) ?? .sky
         cloudSyncEnabled = false // Cloud Sync is unavailable in this build.
         cloudSyncBookmark = defaults.data(forKey: "cloudSyncBookmark")
+        menuBarIcon = defaults.string(forKey: "menuBarIcon").flatMap { NoteIcons.menuBar.contains($0) ? $0 : nil } ?? "note.text"
         showInDock = defaults.object(forKey: "showInDock") as? Bool ?? false
         display = defaults.string(forKey: "display") ?? "main"
         showOverFullScreen = defaults.object(forKey: "showOverFullScreen") as? Bool ?? true
@@ -137,9 +166,10 @@ final class AppSettings: ObservableObject {
         appearance = AppearanceMode.initial(saved: defaults.string(forKey: "appearance"))
         interfaceColor = InterfaceColor(rawValue: defaults.string(forKey: "interfaceColor") ?? "") ?? .clay
         useDefaultColor = defaults.bool(forKey: "useDefaultColor")
+        defaultColorHex = (defaults.object(forKey: "defaultColorHex") as? NSNumber).flatMap { (0...0xFFFFFF).contains($0.int64Value) ? UInt32($0.int64Value) : nil }
         defaultColor = NoteColor(rawValue: defaults.integer(forKey: "defaultColor")) ?? .amber
         shareNotes = defaults.object(forKey: "shareNotes") as? Bool ?? true
-        markdownEnabled = defaults.object(forKey: "markdownEnabled") as? Bool ?? true
+        markdownEnabled = defaults.object(forKey: "markdownEnabled") as? Bool ?? false
         markdownPreviewDelay = min(60, max(1, defaults.object(forKey: "markdownPreviewDelay") as? Double ?? 5))
         shortcuts = defaults.data(forKey: "shortcuts").flatMap { try? JSONDecoder().decode([String: GlobalShortcut].self, from: $0) } ?? [:]
         disabledShortcuts = defaults.stringArray(forKey: "disabledShortcuts") ?? []
@@ -272,6 +302,13 @@ final class NoteDatabase {
               deleted REAL, sort_index REAL NOT NULL, pin_x REAL, pin_y REAL
             );
             """)
+        let columns = try prepare("PRAGMA table_info(note)")
+        var hasPresentation = false
+        while sqlite3_step(columns) == SQLITE_ROW {
+            if String(cString: sqlite3_column_text(columns, 1)) == "presentation" { hasPresentation = true }
+        }
+        sqlite3_finalize(columns)
+        if !hasPresentation { try execute("ALTER TABLE note ADD COLUMN presentation BLOB") }
     }
 
     deinit { sqlite3_close(db) }
@@ -295,7 +332,7 @@ final class NoteDatabase {
 
     func load(includeDeleted: Bool = false) throws -> [Note] {
         let condition = includeDeleted ? "" : " WHERE deleted IS NULL"
-        let statement = try prepare("SELECT id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y FROM note\(condition) ORDER BY sort_index")
+        let statement = try prepare("SELECT id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y,presentation FROM note\(condition) ORDER BY sort_index")
         defer { sqlite3_finalize(statement) }
         var result: [Note] = []
         while sqlite3_step(statement) == SQLITE_ROW {
@@ -305,6 +342,11 @@ final class NoteDatabase {
             let count = Int(sqlite3_column_bytes(statement, 2))
             guard let bytes else { continue }
             let body = try crypto.decrypt(Data(bytes: bytes, count: count))
+            var presentation: NotePresentation?
+            if let bytes = sqlite3_column_blob(statement, 12) {
+                let encrypted = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 12)))
+                presentation = try JSONDecoder().decode(NotePresentation.self, from: Data(crypto.decrypt(encrypted).utf8))
+            }
             result.append(Note(
                 id: id,
                 title: title,
@@ -317,7 +359,8 @@ final class NoteDatabase {
                 deletedAt: sqlite3_column_type(statement, 8) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 8)),
                 sortIndex: sqlite3_column_double(statement, 9),
                 pinX: sqlite3_column_type(statement, 10) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 10),
-                pinY: sqlite3_column_type(statement, 11) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 11)
+                pinY: sqlite3_column_type(statement, 11) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 11),
+                presentation: presentation
             ))
         }
         return result
@@ -325,11 +368,11 @@ final class NoteDatabase {
 
     func save(_ note: Note) throws {
         let sql = """
-          INSERT INTO note(id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+          INSERT INTO note(id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y,presentation)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,color=excluded.color,
           pinned=excluded.pinned,updated=excluded.updated,archived=excluded.archived,deleted=excluded.deleted,
-          sort_index=excluded.sort_index,pin_x=excluded.pin_x,pin_y=excluded.pin_y
+          sort_index=excluded.sort_index,pin_x=excluded.pin_x,pin_y=excluded.pin_y,presentation=excluded.presentation
           """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -346,6 +389,11 @@ final class NoteDatabase {
         sqlite3_bind_double(statement, 10, note.sortIndex)
         bind(note.pinX, to: 11, in: statement)
         bind(note.pinY, to: 12, in: statement)
+        if let presentation = note.presentation {
+            let json = try JSONEncoder().encode(presentation)
+            let encrypted = try crypto.encrypt(String(decoding: json, as: UTF8.self))
+            _ = encrypted.withUnsafeBytes { sqlite3_bind_blob(statement, 13, $0.baseAddress, Int32($0.count), sqliteTransient) }
+        } else { sqlite3_bind_null(statement, 13) }
         guard sqlite3_step(statement) == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errmsg(db))) }
     }
 
@@ -404,7 +452,7 @@ final class NotesStore: ObservableObject {
 
     @discardableResult func create() -> Note {
         let next = (notes.map(\Note.sortIndex).max() ?? -1) + 1
-        let note = Note(color: nextNoteColor, sortIndex: next)
+        let note = Note(color: nextNoteColor, sortIndex: next, presentation: settings.useDefaultColor ? settings.defaultColorHex.map { NotePresentation(colorHex: $0) } : nil)
         notes.append(note)
         persist(note)
         return note
@@ -590,6 +638,9 @@ enum SelfCheck {
         try db.save(note)
         let loaded = try db.load()
         precondition(loaded.count == 1 && loaded[0].body == note.body && loaded[0].color == .mint)
+        note.presentation = NotePresentation(colorHex: 0x123456, icon: "star", richText: Data("rich body".utf8))
+        try db.save(note)
+        guard try db.load()[0].presentation == note.presentation else { throw SelfCheckFailure("Note colors, icons or formatting do not persist") }
         note.body = "changed"; try db.save(note)
         let changed = try db.load()
         precondition(changed[0].body == "changed")
@@ -641,7 +692,7 @@ enum SelfCheck {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let storeSettings = AppSettings(defaults: defaults)
-        guard storeSettings.markdownPreviewDelay == 5, storeSettings.activationDelay == 0.05, storeSettings.deckPosition == 0.5, storeSettings.display == "main", storeSettings.fontName == "Helvetica", !storeSettings.showInDock, storeSettings.showOverFullScreen else {
+        guard !storeSettings.markdownEnabled, storeSettings.markdownPreviewDelay == 5, storeSettings.activationDelay == 0.05, storeSettings.deckPosition == 0.5, storeSettings.display == "main", storeSettings.fontName == "Helvetica", !storeSettings.showInDock, storeSettings.showOverFullScreen else {
             throw SelfCheckFailure("New deck defaults are incorrect")
         }
         storeSettings.showOverFullScreen = false
@@ -652,6 +703,15 @@ enum SelfCheck {
               storeSettings.setShortcut(GlobalShortcut(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(cmdKey | optionKey), key: "K"), for: .allNotes),
               AppSettings(defaults: defaults).shortcut(for: .allNotes).key == "K" else {
             throw SelfCheckFailure("Shortcut conflicts or persistence are broken")
+        }
+        storeSettings.menuBarIcon = "pencil"
+        guard AppSettings(defaults: defaults).menuBarIcon == "pencil" else { throw SelfCheckFailure("Menu bar icon is not remembered") }
+        storeSettings.calendarColor = .lilac
+        guard AppSettings(defaults: defaults).calendarColor == .lilac else { throw SelfCheckFailure("Calendar color is not remembered") }
+        storeSettings.calendarID = "primary"; storeSettings.calendarVisibleIDs = ["work", "family"]
+        let calendarSettings = AppSettings(defaults: defaults)
+        guard calendarSettings.calendarID == "primary", calendarSettings.calendarVisibleIDs == ["work", "family"] else {
+            throw SelfCheckFailure("Calendar selections are not remembered")
         }
         storeSettings.markdownPreviewDelay = 12; storeSettings.activationDelay = 0.7; storeSettings.deckPosition = 0.25; storeSettings.display = "external-display"
         let restored = AppSettings(defaults: defaults)
@@ -689,6 +749,12 @@ enum SelfCheck {
         var edited = store.create()
         guard edited.color == .lilac else { throw SelfCheckFailure("New notes ignore the selected default color") }
         guard store.create().color == .lilac else { throw SelfCheckFailure("Default color mode does not stay fixed") }
+        storeSettings.defaultColorHex = 0x1256AB
+        let customNote = store.create()
+        guard customNote.presentation?.colorHex == 0x1256AB, AppSettings(defaults: defaults).defaultColorHex == 0x1256AB else {
+            throw SelfCheckFailure("The custom color in Settings does not persist or apply to new notes")
+        }
+        storeSettings.defaultColorHex = nil
         storeSettings.useDefaultColor = false
         guard store.create().color == .amber, store.create().color == .coral else {
             throw SelfCheckFailure("Consecutive new notes do not rotate colors")
@@ -720,6 +786,7 @@ enum SelfCheck {
         guard try editDB.load().first(where: { $0.id == edited.id })?.body == "saved before update" else {
             throw SelfCheckFailure("Quitting for an update loses pending note edits")
         }
+        try AppSelfCheck.checkDeckHover(store: store, settings: storeSettings)
         print("Margin self-check passed")
     }
 
