@@ -403,8 +403,8 @@ final class StickyWindowController: NSWindowController, NSWindowDelegate {
         panel.contentView = NSHostingView(rootView: NoteEditorView(
             noteID: note.id, store: store, settings: settings,
             close: { [weak self] in self?.requestDismiss() },
-            archive: { [weak self] in store.archive(note.id); self?.dismiss() },
-            delete: { [weak self] in store.delete(note.id); self?.dismiss() },
+            archive: { [weak self] in self?.requestDismiss { store.archive(note.id) } },
+            delete: { [weak self] in self?.requestDismiss { store.delete(note.id) } },
             pin: { [weak self] pinned in self?.setPinned(pinned) }
         ))
         let size = NSSize(width: 448, height: 424)
@@ -483,21 +483,19 @@ final class StickyWindowController: NSWindowController, NSWindowDelegate {
         } completionHandler: { completion?() }
     }
 
-    private func requestDismiss() {
+    private func requestDismiss(action: (() -> Bool)? = nil) {
         guard !isDismissing else { return }
         isDismissing = true
         window?.endEditing(for: nil)
-        DispatchQueue.main.async { [weak self] in self?.finishDismiss() }
-    }
-
-    private func dismiss() {
-        guard !isDismissing else { return }
-        isDismissing = true
-        finishDismiss()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let action, !action() { self.isDismissing = false; return }
+            self.finishDismiss()
+        }
     }
 
     private func finishDismiss() {
-        store.flush(noteID)
+        guard store.flush(noteID) else { isDismissing = false; return }
         guard store.note(noteID)?.pinned != true,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { close(); return }
         guard let panel = window else { close(); return }
@@ -510,20 +508,20 @@ final class StickyWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func setPinned(_ pinned: Bool) {
-        guard var note = store.note(noteID), let frame = window?.frame else { return }
-        note.pinned = pinned
-        if pinned { note.pinX = frame.origin.x; note.pinY = frame.origin.y }
+        guard let frame = window?.frame else { return }
         settings.rememberNotePosition(x: frame.origin.x, y: frame.origin.y)
-        store.update(note, immediate: true)
+        store.edit(noteID, immediate: true) {
+            $0.pinned = pinned
+            if pinned { $0.pinX = frame.origin.x; $0.pinY = frame.origin.y }
+        }
     }
 
     func windowDidMove(_ notification: Notification) {
         guard Self.shouldRememberMove(hasFinishedOpening: remembersMoves, isDismissing: isDismissing),
               let frame = window?.frame else { return }
         settings.rememberNotePosition(x: frame.origin.x, y: frame.origin.y)
-        guard var note = store.note(noteID), note.pinned else { return }
-        note.pinX = frame.origin.x; note.pinY = frame.origin.y
-        store.update(note)
+        guard store.note(noteID)?.pinned == true else { return }
+        store.edit(noteID) { $0.pinX = frame.origin.x; $0.pinY = frame.origin.y }
     }
 }
 
@@ -535,7 +533,7 @@ final class AppCoordinator {
     private var edges: [ObjectIdentifier: EdgePanelController] = [:]
     private var editors: [UUID: StickyWindowController] = [:]
     private var allNotes: NSWindowController?
-    private var archiveWindow: NSWindowController?
+    let libraryNavigation = NoteLibraryNavigation()
     private var settingsWindow: NSWindowController?
     private var calendarWindow: NSWindowController?
     private var onboarding: NSWindowController?
@@ -548,7 +546,6 @@ final class AppCoordinator {
             guard let self else { return }
             NSApp.appearance = self.settings.appearance.nsAppearance
             self.refreshPanels()
-            if !self.settings.calendarEnabled { self.calendarWindow?.close(); self.calendarWindow = nil }
         } }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.rebuildPanels() }
         for event in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification] {
@@ -568,7 +565,7 @@ final class AppCoordinator {
             if CommandLine.arguments.contains("--capsule-test") { return }
             showDeck()
             if CommandLine.arguments.contains("--deck-test") { return }
-            showAllNotes()
+            showAllNotes(filter: CommandLine.arguments.contains("--archive-test") ? .archived : .all)
             if CommandLine.arguments.contains("--editor-test"), let note = store.active.first { openEditor(note.id) }
             return
         }
@@ -627,7 +624,7 @@ final class AppCoordinator {
 
     private func setDeckHidden(_ hidden: Bool) {
         guard deckHidden != hidden else { return }
-        store.flushAll()
+        guard store.flushAll() else { return }
         deckHidden = hidden
         refreshDeckVisibility()
         editors.values.forEach { if hidden { $0.window?.orderOut(nil) } else { $0.window?.orderFrontRegardless() } }
@@ -692,29 +689,28 @@ final class AppCoordinator {
     }
 
     func showAllNotes(filter: NoteFilter = .all) {
-        if let allNotes { allNotes.window?.makeKeyAndOrderFront(nil); return }
+        libraryNavigation.query = ""
+        libraryNavigation.filter = filter
+        if let allNotes {
+            allNotes.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 786, height: 634), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.contentMinSize = NSSize(width: 760, height: 480)
         window.title = "All Notes"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.contentView = NSHostingView(rootView: AllNotesView(store: store, initialFilter: filter, open: { [weak self] in self?.openEditor($0) }))
+        window.contentView = NSHostingView(rootView: AllNotesView(store: store, navigation: libraryNavigation, open: { [weak self] in self?.openEditor($0) }))
+        if CommandLine.arguments.contains("--ui-test"), CommandLine.arguments.contains("--minimum-size-test") { window.setContentSize(window.contentMinSize) }
         let controller = NSWindowController(window: window); allNotes = controller
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.allNotes = nil }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
 
-    func showArchive() {
-        if let archiveWindow { archiveWindow.window?.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 796, height: 494), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.title = "Archive"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
-        window.contentView = NSHostingView(rootView: ArchiveView(store: store, open: { [weak self] in self?.openEditor($0) }))
-        let controller = NSWindowController(window: window); archiveWindow = controller
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.archiveWindow = nil }
-        window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
-    }
+    func showArchive() { showAllNotes(filter: .archived) }
 
     func showCalendar() {
-        guard settings.calendarEnabled else { return }
         if let calendarWindow { calendarWindow.window?.makeKeyAndOrderFront(nil); return }
         let pointer = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(pointer) } ?? NSScreen.main!
@@ -745,13 +741,14 @@ final class AppCoordinator {
 
     func showSettings() {
         if let settingsWindow { settingsWindow.window?.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 700), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.contentMinSize = NSSize(width: 780, height: 700)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 720), styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.contentMinSize = NSSize(width: 880, height: 520)
         window.title = "Settings"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         let hosting = NSHostingView(rootView: SettingsView(settings: settings, store: store, cloudSync: cloudSync, updater: updater))
         hosting.sizingOptions = []
         window.contentView = hosting
+        if CommandLine.arguments.contains("--ui-test"), CommandLine.arguments.contains("--minimum-size-test") { window.setContentSize(window.contentMinSize) }
         let controller = NSWindowController(window: window); settingsWindow = controller
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.settingsWindow = nil }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -908,6 +905,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(withTitle: "New Note", action: #selector(statusNewNote(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "All Notes…", action: #selector(statusAllNotes(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Archive…", action: #selector(statusArchive(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Calendar…", action: #selector(statusCalendar(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Settings…", action: #selector(statusSettings(_:)), keyEquivalent: "")
         let screenSide = NSMenuItem(title: "Screen Side", action: nil, keyEquivalent: "")
         screenSide.image = NSImage(systemSymbolName: "rectangle.lefthalf.inset.filled", accessibilityDescription: nil)
@@ -937,6 +935,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func statusNewNote(_ sender: Any?) { coordinator.createNote() }
     @objc private func statusAllNotes(_ sender: Any?) { coordinator.showAllNotes() }
     @objc private func statusArchive(_ sender: Any?) { coordinator.showArchive() }
+    @objc private func statusCalendar(_ sender: Any?) { coordinator.showCalendar() }
     @objc private func statusSettings(_ sender: Any?) { coordinator.showSettings() }
     @objc fileprivate func statusCloseWindow(_ sender: Any?) { (NSApp.keyWindow ?? NSApp.mainWindow)?.performClose(sender) }
     @objc private func statusToggleDeck(_ sender: Any?) { coordinator.toggleDeckHidden() }
@@ -945,6 +944,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func statusSideLeft(_ sender: Any?) { settings.side = .left }
     @objc private func statusSideRight(_ sender: Any?) { settings.side = .right }
     @objc private func statusSideBottom(_ sender: Any?) { settings.side = .bottom }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        sender.keyWindow?.endEditing(for: nil)
+        guard store.flushAll() else {
+            let alert = NSAlert()
+            alert.messageText = "Your latest changes could not be saved"
+            alert.informativeText = store.errorMessage ?? "Keep Margin open and try again."
+            alert.addButton(withTitle: "Keep Margin Open")
+            alert.runModal()
+            return .terminateCancel
+        }
+        return .terminateNow
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         store.flushAll()
@@ -961,6 +973,46 @@ enum AppSelfCheck {
         let coordinator = AppCoordinator(store: store, settings: settings, cloudSync: sync, updater: updates.updater)
         let deck = EdgePanelController(screen: screen, store: store, settings: settings, coordinator: coordinator)
         defer { deck.close() }
+        coordinator.showAllNotes()
+        guard let library = NSApp.windows.first(where: { $0.title == "All Notes" }),
+              let hosting = library.contentView as? NSHostingView<AllNotesView> else {
+            throw SelfCheckFailure("All Notes did not open its library")
+        }
+        coordinator.libraryNavigation.query = "no matching notes"
+        coordinator.showArchive()
+        guard hosting.rootView.navigation.filter == .archived,
+              hosting.rootView.navigation.query.isEmpty,
+              NSApp.windows.filter({ $0.title == "All Notes" && $0.isVisible }).count == 1,
+              !NSApp.windows.contains(where: { $0.title == "Archive" && $0.isVisible }) else {
+            throw SelfCheckFailure("Archive did not reuse and retarget the library")
+        }
+        coordinator.showAllNotes()
+        guard hosting.rootView.navigation.filter == .all, library.isVisible else {
+            throw SelfCheckFailure("All Notes did not reset the open library filter")
+        }
+        library.close()
+        coordinator.showArchive()
+        guard coordinator.libraryNavigation.filter == .archived,
+              NSApp.windows.contains(where: { $0.title == "All Notes" && $0.isVisible }) else {
+            throw SelfCheckFailure("Archive could not reopen the shared library")
+        }
+        NSApp.windows.first(where: { $0.title == "All Notes" && $0.isVisible })?.close()
+        settings.calendarEnabled = true
+        coordinator.showCalendar()
+        guard let calendar = NSApp.windows.first(where: { $0.title == "Calendar" }) else {
+            throw SelfCheckFailure("Margin Calendar cannot open")
+        }
+        settings.calendarEnabled = false
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        guard calendar.isVisible else {
+            throw SelfCheckFailure("Turning off the calendar wing turns off Margin Calendar")
+        }
+        calendar.close()
+        coordinator.showCalendar()
+        guard NSApp.windows.contains(where: { $0.title == "Calendar" && $0.isVisible }) else {
+            throw SelfCheckFailure("Margin Calendar cannot reopen while its deck wing is hidden")
+        }
+        NSApp.windows.first(where: { $0.title == "Calendar" })?.close()
         deck.setExpanded(true)
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         let frame = deck.window!.frame

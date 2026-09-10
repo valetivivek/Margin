@@ -6,7 +6,9 @@ Update the short version and build number in `Info.plist`, then add detailed rel
 ./scripts/package-dmg.sh
 ```
 
-The script builds and checks both architectures, verifies the app signature and DMG, and writes a SHA-256 checksum. Push a matching tag such as `v1.0.3`; the release workflow publishes the DMG, checksum, and signed update feed.
+For local development, use `./scripts/package-dmg.sh --build-only`; use `--install` after quitting Margin to update `/Applications/Margin.app`. These modes do not create a DMG. A failed build leaves the previous verified app intact.
+
+Without arguments, the script builds and checks both architectures, verifies the app signature and DMG, and writes a SHA-256 checksum. Push a matching tag such as `v1.0.3`; the release workflow publishes the DMG, checksum, and signed update feed.
 
 The repository and its releases must be public before pushing the tag. Installed copies of Margin do not have GitHub credentials, so a feed or DMG hosted in a private release returns `404` and Sparkle cannot update. The release workflow checks this before publishing and verifies the public feed afterward.
 

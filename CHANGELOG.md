@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 - 2026-09-09
+
+- Redesigned Settings with a left sidebar, clearer sections, and a live appearance preview. Scrolling works without visible scrollbars.
+- Simplified Privacy & legal controls and combined archived notes into the All Notes library.
+- Centralized note drafts and saving so pinning, moving, and formatting preserve pending edits. Failed saves retain drafts for retry and prevent closing unsaved work.
+- Added a verified build workflow that preserves the current app when compilation fails, with separate development, install, and release modes.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.3.0 - 2026-09-08
 
 Margin 1.3.0 adds a full calendar wing, native rich-text formatting, automatic bullets, note colors and icons, and a tighter Settings layout.

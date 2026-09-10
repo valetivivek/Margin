@@ -2,18 +2,48 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
+MODE="${1:-release}"
+case "$MODE" in
+  release|--build-only|--install) ;;
+  *) print -u2 "Usage: $0 [--build-only | --install]"; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { print -u2 "Expected at most one build mode"; exit 2; }
+# Prefer full Xcode when Command Line Tools is selected; SwiftUI needs its plugins.
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+mkdir -p "$ROOT/.build" "$ROOT/build"
+LOCK="$ROOT/.build/build.lock"
+mkdir "$LOCK" 2>/dev/null || { print -u2 "Another build is active (lock: $LOCK)"; exit 1; }
+STAGE=""
+PREVIOUS=""
+DESTINATION=""
+cleanup() {
+  if [[ -n "$PREVIOUS" && -d "$PREVIOUS" && ! -e "$DESTINATION" ]]; then
+    mv "$PREVIOUS" "$DESTINATION"
+  fi
+  [[ -z "$STAGE" ]] || rm -rf "$STAGE"
+  rmdir "$LOCK"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+STAGE="$(mktemp -d "$ROOT/.build/current.XXXXXX")"
 SWIFTC="$(xcrun --find swiftc)"
-SDK="$(xcrun --sdk macosx --show-sdk-path)"
+SDK="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
+# ponytail: CLT 27 lacks SwiftUI macros; use its bundled 26.5 SDK until full Xcode is installed.
+if [[ -z "${SDKROOT:-}" && "$SWIFTC" == /Library/Developer/CommandLineTools/* && -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]]; then
+  SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+fi
+print "Building with SDK: $SDK"
 CACHE="$ROOT/.build/module-cache"
-APP="$ROOT/build/Margin.app"
+APP="$STAGE/Margin.app"
 SPARKLE_VERSION="2.9.6"
 SPARKLE_ROOT="$ROOT/.build/sparkle-$SPARKLE_VERSION"
 SPARKLE_FRAMEWORK="$SPARKLE_ROOT/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")"
 NAME="Margin-$VERSION-universal.dmg"
 OUTPUT="$ROOT/dist/$NAME"
-STAGE="$(mktemp -d /private/tmp/margin-dmg.XXXXXX)"
-trap 'rm -rf "$STAGE"' EXIT
 
 if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
   archive="$ROOT/.build/Sparkle-$SPARKLE_VERSION.zip"
@@ -25,16 +55,17 @@ fi
 
 [[ -x "$SWIFTC" && -d "$SDK" ]] || { print -u2 "A full Xcode installation is required"; exit 1; }
 
-rm -rf "$APP"
-mkdir -p "$CACHE" "$APP/Contents/MacOS" "$APP/Contents/Resources/Fonts" "$APP/Contents/Frameworks" "$ROOT/.build/bin"
+mkdir -p "$CACHE" "$APP/Contents/MacOS" "$APP/Contents/Resources/Fonts" "$APP/Contents/Frameworks" "$STAGE/bin"
 sources=("$ROOT"/Sources/**/*.swift(N))
 common=(-sdk "$SDK" -swift-version 5 -O -F "${SPARKLE_FRAMEWORK:h}" -framework Sparkle -framework AppKit -framework EventKit -framework SwiftUI -framework Combine -framework CryptoKit -framework Security -framework LocalAuthentication -framework ServiceManagement -framework Carbon -Xlinker -rpath -Xlinker @executable_path/../Frameworks -lsqlite3)
 
-for arch in arm64 x86_64; do
-  CLANG_MODULE_CACHE_PATH="$CACHE" "$SWIFTC" "${common[@]}" -target "$arch-apple-macos13.0" "${sources[@]}" -o "$ROOT/.build/bin/Margin-$arch"
+architectures=(arm64 x86_64)
+[[ "$MODE" == release ]] || architectures=("$(uname -m)")
+for arch in "${architectures[@]}"; do
+  CLANG_MODULE_CACHE_PATH="$CACHE" "$SWIFTC" "${common[@]}" -target "$arch-apple-macos13.0" "${sources[@]}" -o "$STAGE/bin/Margin-$arch"
 done
 
-lipo -create "$ROOT/.build/bin/Margin-arm64" "$ROOT/.build/bin/Margin-x86_64" -output "$APP/Contents/MacOS/Margin"
+lipo -create "$STAGE"/bin/Margin-* -output "$APP/Contents/MacOS/Margin"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 python3 "$ROOT/scripts/package-legal.py" "$APP/Contents/Resources/Legal"
 cp -R "$ROOT/Resources/Fonts/." "$APP/Contents/Resources/Fonts/"
@@ -55,20 +86,48 @@ fi
 codesign --verify --deep --strict "$APP"
 "$APP/Contents/MacOS/Margin" --self-check
 
-mkdir -p "$ROOT/dist"
-ditto "$APP" "$STAGE/Margin.app"
-cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
-cp "$ROOT/PRIVACY.md" "$ROOT/TERMS.md" "$ROOT/DATA-DELETION.md" "$ROOT/THIRD-PARTY-NOTICES.md" "$ROOT/SECURITY.md" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
-hdiutil create -ov -format UDZO -volname "Margin $VERSION" -srcfolder "$STAGE" "$OUTPUT"
-hdiutil verify "$OUTPUT"
+# Replace only after compilation, bundle verification and self-check all pass.
+publish_app() {
+  local candidate="$1"
+  DESTINATION="$2"
+  PREVIOUS="$STAGE/previous.app"
+  [[ ! -e "$DESTINATION" ]] || mv "$DESTINATION" "$PREVIOUS"
+  if ! mv "$candidate" "$DESTINATION"; then
+    [[ ! -d "$PREVIOUS" ]] || mv "$PREVIOUS" "$DESTINATION"
+    return 1
+  fi
+  rm -rf "$PREVIOUS"
+  PREVIOUS=""
+}
+publish_app "$APP" "$ROOT/build/Margin.app"
+APP="$ROOT/build/Margin.app"
+print "Verified current app: $APP"
+if [[ "$MODE" == --install ]]; then
+  if pgrep -x Margin >/dev/null; then
+    print -u2 "Quit Margin, then rerun --install. The verified build is ready; the running app was not replaced."
+    exit 1
+  fi
+  ditto "$APP" "$STAGE/install.app"
+  publish_app "$STAGE/install.app" /Applications/Margin.app
+  print "Installed current app: /Applications/Margin.app"
+fi
+[[ "$MODE" == release ]] || exit 0
+
+mkdir -p "$ROOT/dist" "$STAGE/dmg"
+ditto "$APP" "$STAGE/dmg/Margin.app"
+cp "$ROOT/LICENSE" "$STAGE/dmg/LICENSE.txt"
+cp "$ROOT/PRIVACY.md" "$ROOT/TERMS.md" "$ROOT/DATA-DELETION.md" "$ROOT/THIRD-PARTY-NOTICES.md" "$ROOT/SECURITY.md" "$STAGE/dmg/"
+ln -s /Applications "$STAGE/dmg/Applications"
+hdiutil create -ov -format UDZO -volname "Margin $VERSION" -srcfolder "$STAGE/dmg" "$STAGE/$NAME"
+hdiutil verify "$STAGE/$NAME"
 
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
   [[ -n "${CODE_SIGN_IDENTITY:-}" ]] || { print -u2 "NOTARY_PROFILE requires CODE_SIGN_IDENTITY"; exit 1; }
-  xcrun notarytool submit "$OUTPUT" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$OUTPUT"
+  xcrun notarytool submit "$STAGE/$NAME" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$STAGE/$NAME"
 fi
 
-(cd "$ROOT/dist" && shasum -a 256 "$NAME" > "$NAME.sha256")
-print "Built: $APP"
+(cd "$STAGE" && shasum -a 256 "$NAME" > "$NAME.sha256")
+mv "$STAGE/$NAME" "$OUTPUT"
+mv "$STAGE/$NAME.sha256" "$OUTPUT.sha256"
 print "Packaged: $OUTPUT"

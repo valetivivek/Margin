@@ -410,6 +410,8 @@ struct StickyArchive: Codable {
     var notes: [Note]
 }
 
+enum NoteSaveState { case saved, pending, failed }
+
 final class NotesStore: ObservableObject {
     @Published private(set) var notes: [Note] = []
     @Published var undoNote: Note?
@@ -419,6 +421,7 @@ final class NotesStore: ObservableObject {
     private let database: NoteDatabase
     private var pending: [UUID: DispatchWorkItem] = [:]
     private var drafts: [UUID: Note] = [:]
+    private var failedSaves: Set<UUID> = []
     private var deletedRecords: [UUID: Note] = [:]
 
     init(settings: AppSettings, database: NoteDatabase? = nil) {
@@ -463,53 +466,67 @@ final class NotesStore: ObservableObject {
         var note = create()
         note.title = "Getting started"
         note.body = "Hover the right edge of the screen to open your deck.\n\n- Click a card to open it\n- Drag cards up / down to arrange them\n- Pin a note to keep it on your desktop\n- ⌥⌘N makes a new note, ⌥⌘L lists them all\n\nReplace this with your first note."
-        update(note, immediate: true)
+        persist(note)
         return note
     }
 
     func note(_ id: UUID) -> Note? { drafts[id] ?? notes.first { $0.id == id } }
 
-    func update(_ note: Note, immediate: Bool = false) {
-        guard let index = notes.firstIndex(where: { $0.id == note.id }) else { return }
-        var value = note
+    func saveState(_ id: UUID) -> NoteSaveState {
+        if failedSaves.contains(id) { return .failed }
+        return drafts[id] == nil ? .saved : .pending
+    }
+
+    // Mutate the latest draft, never a possibly stale copy held by a caller.
+    @discardableResult
+    func edit(_ id: UUID, immediate: Bool = false, _ change: (inout Note) -> Void) -> Note? {
+        guard var value = note(id) else { return nil }
+        let previous = value
+        change(&value)
+        guard value != previous else {
+            if immediate { flush(id) }
+            return value
+        }
         value.updatedAt = Date()
-        pending[value.id]?.cancel()
-        drafts[value.id] = value
-        if immediate {
-            notes[index] = value
-            drafts[value.id] = nil
-            persist(value)
-            return
+        drafts[id] = value
+        pending.removeValue(forKey: id)?.cancel()
+        if immediate { flush(id) }
+        else {
+            let work = DispatchWorkItem { [weak self] in self?.flush(id) }
+            pending[id] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let index = self.notes.firstIndex(where: { $0.id == value.id }) else { return }
-            self.notes[index] = value
-            self.drafts[value.id] = nil
-            self.persist(value)
-        }
-        pending[value.id] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        return value
     }
 
-    func flush(_ id: UUID) {
-        if let draft = drafts[id] { update(draft, immediate: true) }
+    @discardableResult
+    func flush(_ id: UUID) -> Bool {
+        pending.removeValue(forKey: id)?.cancel()
+        guard let draft = drafts[id], let index = notes.firstIndex(where: { $0.id == id }) else { return true }
+        let saved = write(draft)
+        if saved { drafts[id] = nil }
+        notes[index] = draft
+        return saved
     }
 
-    func flushAll() {
-        for id in Array(drafts.keys) { flush(id) }
+    @discardableResult
+    func flushAll() -> Bool {
+        var saved = true
+        for id in Array(drafts.keys) { if !flush(id) { saved = false } }
+        return saved
     }
 
-    func archive(_ id: UUID) {
-        guard var note = note(id) else { return }
-        note.archivedAt = Date(); note.pinned = false
-        update(note, immediate: true)
+    @discardableResult
+    func archive(_ id: UUID) -> Bool {
+        guard edit(id, { $0.archivedAt = Date(); $0.pinned = false }) != nil else { return false }
+        return flush(id)
     }
 
-    func restore(_ id: UUID) {
-        guard var note = note(id) else { return }
-        note.archivedAt = nil
-        note.sortIndex = (active.map(\Note.sortIndex).max() ?? -1) + 1
-        update(note, immediate: true)
+    @discardableResult
+    func restore(_ id: UUID) -> Bool {
+        let nextIndex = (active.map(\Note.sortIndex).max() ?? -1) + 1
+        guard edit(id, { $0.archivedAt = nil; $0.sortIndex = nextIndex }) != nil else { return false }
+        return flush(id)
     }
 
     func duplicate(_ id: UUID) -> Note? {
@@ -520,18 +537,20 @@ final class NotesStore: ObservableObject {
         return copy
     }
 
-    func delete(_ id: UUID) {
-        guard let index = notes.firstIndex(where: { $0.id == id }), let note = note(id) else { return }
-        notes.remove(at: index)
-        pending[id]?.cancel()
-        drafts[id] = nil
+    @discardableResult
+    func delete(_ id: UUID) -> Bool {
+        guard let index = notes.firstIndex(where: { $0.id == id }), let note = note(id) else { return false }
         var tombstone = note; tombstone.updatedAt = Date(); tombstone.deletedAt = tombstone.updatedAt
-        do { try database.save(tombstone) } catch { errorMessage = error.localizedDescription }
+        guard write(tombstone) else { return false }
+        pending.removeValue(forKey: id)?.cancel()
+        drafts[id] = nil
+        notes.remove(at: index)
         deletedRecords[id] = tombstone
         undoNote = note
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             if self?.undoNote?.id == id { self?.undoNote = nil }
         }
+        return true
     }
 
     func undoDelete() {
@@ -577,7 +596,7 @@ final class NotesStore: ObservableObject {
         var items = active
         guard let from = items.firstIndex(where: { $0.id == source }), let to = items.firstIndex(where: { $0.id == target }) else { return }
         let moved = items.remove(at: from); items.insert(moved, at: to)
-        for (index, var note) in items.enumerated() { note.sortIndex = Double(index); update(note, immediate: true) }
+        for (index, note) in items.enumerated() { edit(note.id, immediate: true) { $0.sortIndex = Double(index) } }
     }
 
     func move(_ source: UUID, by step: Int) {
@@ -602,7 +621,8 @@ final class NotesStore: ObservableObject {
                     for var note in archive.notes { note.id = UUID(); note.sortIndex = (notes.map(\Note.sortIndex).max() ?? -1) + 1; notes.append(note); persist(note) }
                 } else {
                     let body = try String(contentsOf: url, encoding: .utf8)
-                    var note = create(); note.title = url.deletingPathExtension().lastPathComponent; note.body = body; update(note, immediate: true)
+                    let note = create()
+                    edit(note.id, immediate: true) { $0.title = url.deletingPathExtension().lastPathComponent; $0.body = body }
                 }
             }
         } catch { errorMessage = error.localizedDescription }
@@ -611,8 +631,20 @@ final class NotesStore: ObservableObject {
     func archiveData(_ values: [Note]) throws -> Data { try JSONEncoder.hmn.encode(StickyArchive(notes: values)) }
 
     private func persist(_ note: Note) {
-        pending[note.id] = nil
-        do { try database.save(note) } catch { errorMessage = error.localizedDescription }
+        drafts[note.id] = note
+        flush(note.id)
+    }
+
+    private func write(_ note: Note) -> Bool {
+        do {
+            try database.save(note)
+            failedSaves.remove(note.id)
+            return true
+        } catch {
+            failedSaves.insert(note.id)
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 }
 
@@ -746,7 +778,7 @@ enum SelfCheck {
         storeSettings.useDefaultColor = true
         storeSettings.defaultColor = .lilac
         let store = NotesStore(settings: storeSettings, database: editDB)
-        var edited = store.create()
+        let edited = store.create()
         guard edited.color == .lilac else { throw SelfCheckFailure("New notes ignore the selected default color") }
         guard store.create().color == .lilac else { throw SelfCheckFailure("Default color mode does not stay fixed") }
         storeSettings.defaultColorHex = 0x1256AB
@@ -772,7 +804,7 @@ enum SelfCheck {
         store.move(reorderedID, by: -originalOrder.count)
         var publications = 0
         let observation = store.objectWillChange.sink { publications += 1 }
-        for index in 0..<100 { edited.body = "keystroke \(index)"; store.update(edited) }
+        for index in 0..<100 { store.edit(edited.id) { $0.body = "keystroke \(index)" } }
         withExtendedLifetime(observation) {}
         guard publications <= 1 else { throw SelfCheckFailure("Editing published the entire note list \(publications) times") }
         store.flush(edited.id)
@@ -780,12 +812,49 @@ enum SelfCheck {
               try editDB.load().first(where: { $0.id == edited.id })?.body == "keystroke 99" else {
             throw SelfCheckFailure("Closing an editor does not flush its pending draft")
         }
-        edited.body = "saved before update"
-        store.update(edited)
+        store.edit(edited.id) { $0.body = "saved before update" }
         store.flushAll()
         guard try editDB.load().first(where: { $0.id == edited.id })?.body == "saved before update" else {
             throw SelfCheckFailure("Quitting for an update loses pending note edits")
         }
+        store.edit(edited.id) { $0.body = "pending text"; $0.presentation = NotePresentation(richText: Data([1, 2, 3])) }
+        store.edit(edited.id) { $0.pinned = true; $0.pinX = 42 }
+        let editTime = store.note(edited.id)!.updatedAt
+        guard store.flush(edited.id), store.note(edited.id)?.updatedAt == editTime,
+              store.note(edited.id)?.body == "pending text",
+              store.note(edited.id)?.presentation?.richText == Data([1, 2, 3]) else {
+            throw SelfCheckFailure("Metadata edits overwrite pending text or formatting")
+        }
+        var failureDB: OpaquePointer?
+        guard sqlite3_open(editFolder.appendingPathComponent("notes.sqlite3").path, &failureDB) == SQLITE_OK else {
+            throw SelfCheckFailure("Cannot open failure-check database")
+        }
+        defer { sqlite3_close(failureDB) }
+        guard sqlite3_exec(failureDB, "CREATE TRIGGER reject_save BEFORE INSERT ON note BEGIN SELECT RAISE(ABORT, 'test failure'); END", nil, nil, nil) == SQLITE_OK else {
+            throw SelfCheckFailure("Cannot inject save failure")
+        }
+        store.edit(edited.id) { $0.body = "retry this draft" }
+        guard !store.flushAll(), store.saveState(edited.id) == .failed,
+              store.note(edited.id)?.body == "retry this draft",
+              try editDB.load().first(where: { $0.id == edited.id })?.body == "pending text" else {
+            throw SelfCheckFailure("Failed save discards the draft or reports success")
+        }
+        guard sqlite3_exec(failureDB, "DROP TRIGGER reject_save", nil, nil, nil) == SQLITE_OK,
+              store.flushAll(), store.saveState(edited.id) == .saved,
+              try editDB.load().first(where: { $0.id == edited.id })?.body == "retry this draft" else {
+            throw SelfCheckFailure("Failed draft cannot be retried")
+        }
+        store.errorMessage = nil
+        store.edit(edited.id) { $0.body = "archive pending draft" }
+        guard store.archive(edited.id), store.restore(edited.id), store.note(edited.id)?.body == "archive pending draft" else {
+            throw SelfCheckFailure("Archive loses pending edits")
+        }
+        store.edit(edited.id) { $0.body = "delete pending draft" }
+        guard store.delete(edited.id), store.flush(edited.id), store.note(edited.id) == nil else {
+            throw SelfCheckFailure("A pending save resurrects a deleted note")
+        }
+        store.undoDelete()
+        guard store.note(edited.id)?.body == "delete pending draft" else { throw SelfCheckFailure("Undo loses the latest draft") }
         try AppSelfCheck.checkDeckHover(store: store, settings: storeSettings)
         print("Margin self-check passed")
     }

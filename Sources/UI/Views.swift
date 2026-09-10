@@ -804,11 +804,11 @@ struct EdgeDeckView: View {
 
     @ViewBuilder private func noteMenu(_ note: Note) -> some View {
         Menu { ForEach(NoteColor.allCases, id: \.rawValue) { value in
-            Button { var copy = note; copy.color = value; copy.presentation?.colorHex = nil; store.update(copy, immediate: true) } label: {
+            Button { store.edit(note.id, immediate: true) { $0.color = value; $0.presentation?.colorHex = nil } } label: {
                 HStack { Image(nsImage: value.menuImage); Text(value.name); if note.color == value && note.presentation?.colorHex == nil { Image(systemName: "checkmark") } }
             }
         } } label: { Label("Color", systemImage: "paintpalette") }
-        Button { var copy = note; copy.pinned.toggle(); store.update(copy, immediate: true); if copy.pinned { open(copy.id) } } label: {
+        Button { if let updated = store.edit(note.id, immediate: true, { $0.pinned.toggle() }), updated.pinned { open(updated.id) } } label: {
             Label(note.pinned ? "Unpin" : "Pin", systemImage: note.pinned ? "pin.slash" : "pin")
         }
         Button { if let copy = store.duplicate(note.id) { open(copy.id) } } label: { Label("Duplicate", systemImage: "doc.on.doc") }
@@ -1519,9 +1519,9 @@ struct NoteEditorView: View {
                 .buttonStyle(.plain).onHover { closeHovered = $0 }.animation(.easeOut(duration: 0.10), value: closeHovered)
                 .accessibilityLabel("Close note").help("Close this note and return to the deck")
                 NoteIconPicker(selection: Binding(get: { note.symbol }, set: { setIcon($0) }), options: NoteIcons.all, label: "Choose note icon")
-                TextField("Untitled note", text: $note.title).textFieldStyle(.plain).font(.system(size: 16, weight: .semibold))
+                TextField("Untitled note", text: binding(\.title)).textFieldStyle(.plain).font(.system(size: 16, weight: .semibold))
                 Spacer()
-                Text("Saved · \(shortAge(note.updatedAt))").font(.system(size: 11)).foregroundStyle(.black.opacity(0.42))
+                Text(saveLabel).font(.system(size: 11)).foregroundStyle(.black.opacity(0.42))
                 if settings.shareNotes {
                     ShareLink(item: NoteFile(note: note), preview: SharePreview(note.title)) {
                         Image(systemName: "square.and.arrow.up").resizable().scaledToFit()
@@ -1529,7 +1529,7 @@ struct NoteEditorView: View {
                     }.buttonStyle(HoverButtonStyle()).foregroundStyle(.black.opacity(0.48)).tint(.black.opacity(0.48)).help("Share as Markdown").accessibilityLabel("Share as Markdown")
                 }
                 DragHandle().frame(width: 24, height: 24).help("Drag to move; drag an edge or corner to resize")
-                Button { note.pinned.toggle(); save(immediate: true); pin(note.pinned) } label: {
+                Button { pin(!note.pinned); if let latest = store.note(noteID) { note = latest } } label: {
                     Image(systemName: note.pinned ? "pin.fill" : "pin").resizable().scaledToFit()
                         .frame(width: 14, height: 14).frame(width: 24, height: 24)
                         .background(note.pinned ? .black.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 6))
@@ -1537,17 +1537,18 @@ struct NoteEditorView: View {
             }
             .padding(.horizontal, 16).frame(height: 47)
             Divider().opacity(0.22).padding(.horizontal, 16)
-            ChecklistTextEditor(text: $note.body, richText: Binding(get: { note.presentation?.richText }, set: { data in
-                if note.presentation == nil { note.presentation = NotePresentation() }
-                note.presentation?.richText = data
-                note.presentation?.richTextBaseSize = settings.textSize
-                save()
+            ChecklistTextEditor(text: binding(\.body), richText: Binding(get: { note.presentation?.richText }, set: { data in
+                edit {
+                    if $0.presentation == nil { $0.presentation = NotePresentation() }
+                    $0.presentation?.richText = data
+                    $0.presentation?.richTextBaseSize = settings.textSize
+                }
             }), font: settings.nsNoteFont, richTextBaseSize: note.presentation?.richTextBaseSize.map { CGFloat($0) }, markdownEnabled: settings.markdownEnabled, previewDelay: settings.markdownPreviewDelay, cancel: close, handle: checklistEditor).padding(.horizontal, 17)
             Divider().opacity(0.2)
             HStack(spacing: 8) {
                 Menu {
                     ForEach(NoteColor.allCases, id: \.rawValue) { value in
-                        Button(value.name) { note.color = value; note.presentation?.colorHex = nil; save(immediate: true) }
+                        Button(value.name) { edit(immediate: true) { $0.color = value; $0.presentation?.colorHex = nil } }
                     }
                 } label: { Image(systemName: "paintpalette").frame(width: 22, height: 24) }
                 .menuStyle(.borderlessButton).fixedSize().help("Note color presets")
@@ -1581,51 +1582,66 @@ struct NoteEditorView: View {
         }
         .foregroundStyle(.black.opacity(0.73))
         .background(note.displayColor, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onChange(of: note.title) { _ in save() }
-        .onChange(of: note.body) { _ in save() }
-        .onChange(of: store.notes) { _ in if let fresh = store.note(noteID), fresh.updatedAt > note.updatedAt { note = fresh } }
+        .onChange(of: store.notes) { _ in if let fresh = store.note(noteID), fresh != note { note = fresh } }
+        .alert("Could not save note", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
+            Button("Retry") { store.errorMessage = nil; store.flush(noteID) }
+            Button("Keep editing", role: .cancel) { store.errorMessage = nil }
+        } message: { Text(store.errorMessage ?? "") }
         .onExitCommand(perform: close)
     }
 
+    private var saveLabel: String {
+        switch store.saveState(noteID) {
+        case .saved: "Saved · \(shortAge(note.updatedAt))"
+        case .pending: "Saving…"
+        case .failed: "Not saved"
+        }
+    }
+
+    private func binding<Value>(_ keyPath: WritableKeyPath<Note, Value>) -> Binding<Value> {
+        Binding(get: { note[keyPath: keyPath] }, set: { value in edit { $0[keyPath: keyPath] = value } })
+    }
+
     private func setIcon(_ symbol: String) {
-        if note.presentation == nil { note.presentation = NotePresentation() }
-        note.presentation?.icon = symbol
-        save(immediate: true)
+        edit(immediate: true) {
+            if $0.presentation == nil { $0.presentation = NotePresentation() }
+            $0.presentation?.icon = symbol
+        }
     }
 
     private func cycleColor() {
-        note.presentation?.colorHex = nil
-        note.color = note.color.next
-        save(immediate: true)
+        edit(immediate: true) { $0.presentation?.colorHex = nil; $0.color = $0.color.next }
     }
 
-    private func save(immediate: Bool = false) {
-        note.updatedAt = Date()
-        store.update(note, immediate: immediate)
+    private func edit(immediate: Bool = false, _ change: (inout Note) -> Void) {
+        if let latest = store.edit(noteID, immediate: immediate, change) { note = latest }
     }
 }
 
 enum NoteFilter: String, CaseIterable { case all = "All", active = "Active", archived = "Archived" }
 
+final class NoteLibraryNavigation: ObservableObject {
+    @Published var filter = NoteFilter.all
+    @Published var query = ""
+}
+
 struct AllNotesView: View {
     @ObservedObject var store: NotesStore
-    @State private var filter: NoteFilter
-    @State private var query = ""
+    @ObservedObject var navigation: NoteLibraryNavigation
     @State private var selected: Set<UUID> = []
     @State private var focused: UUID?
     @State private var exportFormat = ExportFormat.markdown
     let open: (UUID) -> Void
 
-    init(store: NotesStore, initialFilter: NoteFilter, open: @escaping (UUID) -> Void) {
-        self.store = store; _filter = State(initialValue: initialFilter); self.open = open
-    }
-
     private var filtered: [Note] {
-        store.search(query).filter {
-            switch filter { case .all: true; case .active: $0.archivedAt == nil; case .archived: $0.archivedAt != nil }
+        store.search(navigation.query).filter {
+            switch navigation.filter { case .all: true; case .active: $0.archivedAt == nil; case .archived: $0.archivedAt != nil }
         }
     }
-    private var current: Note? { selected.count == 1 ? selected.first.flatMap(store.note) : focused.flatMap(store.note) ?? filtered.first }
+    private var current: Note? {
+        let id = selected.count == 1 ? selected.first : focused
+        return filtered.first { $0.id == id } ?? filtered.first
+    }
     private var actionNotes: [Note] {
         let ids = selected.isEmpty ? Set(current.map { [$0.id] } ?? []) : selected
         return filtered.filter { ids.contains($0.id) }
@@ -1633,7 +1649,7 @@ struct AllNotesView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("All Notes").font(.system(size: 15, weight: .bold))
                     Spacer()
@@ -1642,13 +1658,13 @@ struct AllNotesView: View {
                 }
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search all notes", text: $query).textFieldStyle(.plain)
+                    TextField("Search all notes", text: $navigation.query).textFieldStyle(.plain)
                     Text("\(filtered.count) \(filtered.count == 1 ? "note" : "notes")").foregroundStyle(.secondary).font(.caption2)
                 }
                 .padding(.horizontal, 10).frame(height: 31).background(appSearch, in: RoundedRectangle(cornerRadius: 8))
-                HStack(spacing: 7) { ForEach(NoteFilter.allCases, id: \.self) { filterButton($0) } }
+                HStack(spacing: 8) { ForEach(NoteFilter.allCases, id: \.self) { filterButton($0) } }
                 ScrollView {
-                    LazyVStack(spacing: 3) {
+                    LazyVStack(spacing: 4) {
                         ForEach(filtered) { note in
                             Button { focused = note.id } label: { noteRow(note) }
                                 .buttonStyle(.plain)
@@ -1660,25 +1676,30 @@ struct AllNotesView: View {
                 .padding(6)
                 .modifier(SurfaceCard())
             }
-            .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 12).frame(width: 390).background(appSidebar)
+            .padding(16).frame(width: 320).background(appSidebar)
             Divider()
-            Group {
+            ScrollView {
                 if selected.count > 1 {
                     selectionPane
                 } else if let note = current {
                     previewPane(note)
                 } else {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 12) {
                         Image(systemName: "note.text").font(.system(size: 34)).foregroundStyle(.secondary)
-                        Text("Nothing here yet").font(.headline)
-                        Text("Create a note from the edge of the screen.").foregroundStyle(.secondary)
+                        Text(navigation.query.isEmpty ? (navigation.filter == .archived ? "Nothing archived yet" : "Nothing here yet") : "No matching notes").font(.headline)
+                        Text(navigation.query.isEmpty ? (navigation.filter == .archived ? "Completed notes appear here." : "Create a note from the edge of the screen.") : "Try another search or choose a different filter.")
+                            .foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .padding(.horizontal, 17).padding(.vertical, 20).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(16).frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(appPaper)
-        .onChange(of: filter) { _ in focused = nil; selected.removeAll() }
+        .onChange(of: navigation.filter) { _ in focused = nil; selected.removeAll() }
+        .onChange(of: filtered.map(\.id)) { ids in
+            selected.formIntersection(ids)
+            if let focused, !ids.contains(focused) { self.focused = nil }
+        }
         .alert("Margin", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) { Button("OK") { store.errorMessage = nil } } message: { Text(store.errorMessage ?? "") }
         .safeAreaInset(edge: .bottom) {
             if let undo = store.undoNote { HStack { Text("\(undo.title) deleted"); Button("Undo") { store.undoDelete() } }.padding(9).background(.regularMaterial, in: Capsule()).padding(8) }
@@ -1686,14 +1707,14 @@ struct AllNotesView: View {
     }
 
     private func filterButton(_ value: NoteFilter) -> some View {
-        let isSelected = filter == value
-        return Button { filter = value; focused = nil; selected.removeAll() } label: {
+        let isSelected = navigation.filter == value
+        return Button { navigation.filter = value; focused = nil; selected.removeAll() } label: {
             HStack(spacing: 5) {
                 if isSelected { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
                 Text(value.rawValue)
             }
         }
-            .buttonStyle(HoverButtonStyle()).font(.system(size: 12, weight: filter == value ? .semibold : .regular))
+            .buttonStyle(HoverButtonStyle()).font(.system(size: 12, weight: navigation.filter == value ? .semibold : .regular))
             .foregroundStyle(isSelected ? appAccentForeground : .secondary)
             .padding(.horizontal, 11).frame(height: 27)
             .background(isSelected ? appAccent : .clear, in: RoundedRectangle(cornerRadius: 7))
@@ -1701,7 +1722,7 @@ struct AllNotesView: View {
     }
 
     private func noteRow(_ note: Note) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button { if selected.contains(note.id) { selected.remove(note.id) } else { selected.insert(note.id); focused = note.id } } label: {
                 RoundedRectangle(cornerRadius: 5).fill(selected.contains(note.id) ? appAccent : .clear).frame(width: 18, height: 18)
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.primary.opacity(selected.contains(note.id) ? 0 : 0.22), lineWidth: 1.5))
@@ -1709,9 +1730,14 @@ struct AllNotesView: View {
             }.buttonStyle(HoverButtonStyle()).accessibilityLabel(selected.contains(note.id) ? "Deselect \(note.title)" : "Select \(note.title)")
             Capsule().fill(note.displayColor).frame(width: 4, height: 36)
             VStack(alignment: .leading, spacing: 4) {
-                HStack { Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(note.archivedAt == nil ? "ACTIVE" : "ARCHIVED").font(.system(size: 9, weight: .medium)).padding(.horizontal, 6).padding(.vertical, 3).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5)); Text(shortAge(note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
+                Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    if navigation.filter == .all { Text(note.archivedAt == nil ? "Active" : "Archived") }
+                    Text(shortAge(note.updatedAt))
+                }.font(.caption2).foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 7).padding(.horizontal, 7).contentShape(Rectangle())
@@ -1720,15 +1746,18 @@ struct AllNotesView: View {
     }
 
     private func previewPane(_ note: Note) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                RoundedRectangle(cornerRadius: 3).fill(note.displayColor).frame(width: 9, height: 9)
-                Text(note.archivedAt == nil ? "ACTIVE · IN\nTHE DECK" : "ARCHIVED · \(shortAge(note.archivedAt!).uppercased())")
-                    .font(.system(size: 10, weight: .semibold)).tracking(0.7).foregroundStyle(.secondary)
-                Spacer()
-                Button(note.archivedAt == nil ? "Mark complete" : "Restore to deck") { note.archivedAt == nil ? store.archive(note.id) : store.restore(note.id) }.buttonStyle(MatteButtonStyle())
-                Button("Export…") { ExportController.export(.markdown, notes: [note], store: store) }.buttonStyle(MatteButtonStyle())
-                Button("Delete", role: .destructive) { store.delete(note.id) }.buttonStyle(MatteButtonStyle(fill: .red.opacity(0.10), foreground: .red.opacity(0.72)))
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 3).fill(note.displayColor).frame(width: 8, height: 8)
+                Text(note.archivedAt == nil ? "Active · In the deck" : "Archived")
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Button(note.archivedAt == nil ? "Mark complete" : "Restore to deck") { _ = note.archivedAt == nil ? store.archive(note.id) : store.restore(note.id) }
+                    .buttonStyle(MatteButtonStyle(fill: appAccent, foreground: appAccentForeground)).fixedSize()
+                Button("Export…") { ExportController.export(.markdown, notes: [note], store: store) }.buttonStyle(MatteButtonStyle()).fixedSize()
+                Spacer(minLength: 16)
+                Button("Delete", role: .destructive) { store.delete(note.id) }.buttonStyle(MatteButtonStyle(fill: .red.opacity(0.10), foreground: .red.opacity(0.72))).fixedSize()
             }
             Button { open(note.id) } label: { NotePreview(note: note, settings: store.settings) }
                 .buttonStyle(.plain).help("Open note")
@@ -1737,7 +1766,7 @@ struct AllNotesView: View {
     }
 
     private var selectionPane: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("\(selected.count) notes selected").font(.system(size: 13, weight: .semibold))
                 Spacer(); Button("Clear") { selected.removeAll() }.buttonStyle(HoverButtonStyle()).font(.caption).foregroundStyle(.secondary)
@@ -1752,7 +1781,7 @@ struct AllNotesView: View {
                 Spacer()
                 Button(actionNotes.allSatisfy { $0.archivedAt != nil } ? "Restore" : "Archive") {
                     let restoring = actionNotes.allSatisfy { $0.archivedAt != nil }
-                    actionNotes.forEach { restoring ? store.restore($0.id) : store.archive($0.id) }; selected.removeAll()
+                    actionNotes.forEach { _ = restoring ? store.restore($0.id) : store.archive($0.id) }; selected.removeAll()
                 }.buttonStyle(MatteButtonStyle())
                 Button("Delete", role: .destructive) { actionNotes.forEach { store.delete($0.id) }; selected.removeAll() }
                     .buttonStyle(MatteButtonStyle(fill: .red.opacity(0.10), foreground: .red.opacity(0.72)))
@@ -1835,79 +1864,6 @@ struct ChecklistLine {
     }
 }
 
-struct ArchiveView: View {
-    @ObservedObject var store: NotesStore
-    @State private var query = ""
-    @State private var focused: UUID?
-    let open: (UUID) -> Void
-
-    private var filtered: [Note] { store.search(query, archivedOnly: true) }
-    private var current: Note? { focused.flatMap(store.note) ?? filtered.first }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Archive").font(.system(size: 15, weight: .bold))
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search archived notes", text: $query).textFieldStyle(.plain)
-                    Text("\(filtered.count) \(filtered.count == 1 ? "note" : "notes")").font(.caption2).foregroundStyle(.secondary)
-                }.padding(.horizontal, 10).frame(height: 31).background(appSearch, in: RoundedRectangle(cornerRadius: 8))
-                ScrollView {
-                    LazyVStack(spacing: 3) {
-                        ForEach(filtered) { note in
-                            Button { focused = note.id } label: { archiveRow(note) }
-                                .buttonStyle(.plain)
-                                .onTapGesture(count: 2) { open(note.id) }
-                                .accessibilityAction(named: "Open") { open(note.id) }
-                        }
-                    }
-                }
-                .padding(6)
-                .modifier(SurfaceCard())
-            }.padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 12).frame(width: 351).background(appSidebar)
-            Divider()
-            Group {
-                if let note = current {
-                    VStack(alignment: .leading, spacing: 13) {
-                        HStack {
-                            RoundedRectangle(cornerRadius: 3).fill(note.displayColor).frame(width: 9, height: 9)
-                            Text(archiveStatus(note)).font(.system(size: 10, weight: .semibold)).tracking(0.6).foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Restore to deck") { store.restore(note.id) }.buttonStyle(MatteButtonStyle())
-                            Button("Delete", role: .destructive) { store.delete(note.id) }.buttonStyle(MatteButtonStyle(fill: .red.opacity(0.10), foreground: .red.opacity(0.72)))
-                        }
-                        NotePreview(note: note, settings: store.settings, height: 360)
-                    }
-                } else { VStack { Image(systemName: "archivebox").font(.system(size: 30)); Text("Nothing archived yet.") }.foregroundStyle(.secondary) }
-            }.padding(.leading, 24).padding(.trailing, 14).padding(.top, 21).padding(.bottom, 14).frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(appPaper)
-        .alert("Margin", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) { Button("OK") { store.errorMessage = nil } } message: { Text(store.errorMessage ?? "") }
-        .safeAreaInset(edge: .bottom) {
-            if let undo = store.undoNote { HStack { Text("\(undo.title) deleted"); Button("Undo") { store.undoDelete() } }.padding(9).background(.regularMaterial, in: Capsule()).padding(8) }
-        }
-    }
-
-    private func archiveRow(_ note: Note) -> some View {
-        HStack(spacing: 10) {
-            Capsule().fill(note.displayColor).frame(width: 4, height: 36)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack { Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(); Text(shortAge(note.archivedAt ?? note.updatedAt)).font(.caption2).foregroundStyle(.secondary) }
-                ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
-                    .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
-            }
-        }.padding(.vertical, 7).padding(.horizontal, 7).contentShape(Rectangle())
-            .background(focused == note.id ? appSelectionSurface : .clear, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused == note.id ? appSelectionBorder : .clear, lineWidth: 1))
-    }
-
-    private func archiveStatus(_ note: Note) -> String {
-        let age = shortAge(note.archivedAt ?? note.updatedAt)
-        return age == "now" ? "ARCHIVED JUST NOW" : "ARCHIVED \(age.uppercased()) AGO"
-    }
-}
-
 enum ExportFormat: CaseIterable, Hashable {
     case markdown, text, single, stickies
     var title: String { switch self { case .markdown: "Markdown"; case .text: "Plain text"; case .single: "Single file"; case .stickies: "Sticky archive" } }
@@ -1950,7 +1906,20 @@ enum ExportController {
     }
 }
 
-private enum SettingsTab: String, CaseIterable { case general = "General", notes = "Notes", appearance = "Appearance", calendar = "Calendar", shortcuts = "Keyboard", system = "System", cloud = "Cloud Sync", about = "About" }
+private enum SettingsTab: String, CaseIterable {
+    case general = "General", notes = "Notes", appearance = "Appearance", calendar = "Calendar", shortcuts = "Shortcuts", about = "About"
+
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .notes: "note.text"
+        case .appearance: "paintpalette"
+        case .calendar: "calendar"
+        case .shortcuts: "keyboard"
+        case .about: "info.circle"
+        }
+    }
+}
 
 enum SettingsPalette {
     static func color(_ hex: UInt32) -> NSColor {
@@ -2166,7 +2135,8 @@ struct SettingsView: View {
 
     static func visibleVersion(shortVersion: String) -> String { shortVersion }
 
-    private var surface: Color { SettingsPalette.surface }
+    private var surface: Color { SettingsPalette.adaptive(0xFFFFFF, 0x20211F) }
+    private var groupSurface: Color { SettingsPalette.adaptive(0xF6F5F2, 0x2B2C29) }
     private var secondaryInk: Color { SettingsPalette.secondary }
     private var accent: Color { Color(nsColor: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)) }
     private var rule: Color { SettingsPalette.ink.opacity(contrast == .increased ? 0.55 : 0.10) }
@@ -2177,47 +2147,42 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Color.clear.frame(width: 90, height: 1)
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Settings").font(SettingsPalette.font(12, medium: true))
+                    .padding(.horizontal, 12).padding(.top, 24)
+                VStack(spacing: 4) {
+                    ForEach(SettingsTab.allCases, id: \.self) { value in tabButton(value) }
+                }
                 Spacer()
-                Text("margin").font(SettingsPalette.font(20, medium: true)).tracking(-0.7)
-                Spacer()
-                Text("Settings").font(SettingsPalette.font(11)).foregroundStyle(secondaryInk).frame(width: 90, alignment: .trailing)
-            }.padding(.horizontal, 24).frame(height: 44)
-            HStack(spacing: 24) {
-                ForEach(SettingsTab.allCases, id: \.self) { value in tabButton(value) }
+                Text("Margin \(versionText)").font(SettingsPalette.font(11)).foregroundStyle(secondaryInk)
+                    .padding(.horizontal, 12).padding(.bottom, 16)
             }
-            .frame(maxWidth: .infinity).padding(.horizontal, 20)
-            .overlay(alignment: .bottom) { rule.frame(height: 1) }.padding(.horizontal, 25)
-            Group {
-                VStack(spacing: 14) {
+            .padding(.horizontal, 12).frame(width: 184)
+            .background(groupSurface)
+            Rectangle().fill(rule).frame(width: 1)
+            VStack(spacing: 0) {
+                HStack {
+                    Text(tab.rawValue).font(.custom("Georgia", size: 26)).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    Text("Changes save automatically.").font(SettingsPalette.font(11)).foregroundStyle(secondaryInk)
+                }
+                .padding(.horizontal, 40).frame(height: 88)
+                ScrollView(showsIndicators: false) {
                     Group {
                         switch tab {
                         case .general: general
                         case .notes: notes
-                        case .cloud: cloud
                         case .shortcuts: shortcuts
-                        case .system: system
                         case .appearance: appearance
                         case .calendar: calendarSettings
                         case .about: about
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .top).fixedSize(horizontal: false, vertical: true)
-
+                    .frame(maxWidth: 760, alignment: .topLeading).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 40).padding(.bottom, 32).padding(.top, 8).frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(.horizontal, 28).padding(.top, 12).padding(.bottom, 8)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            HStack {
-                Text("Margin \(versionText)")
-                Spacer()
-                Text("Changes save automatically.")
-            }
-            .font(SettingsPalette.font(10)).foregroundStyle(secondaryInk)
-            .padding(.top, 10).overlay(alignment: .top) { rule.frame(height: 1) }
-            .padding(.horizontal, 28).padding(.bottom, 12)
         }
         .font(SettingsPalette.font(13)).foregroundStyle(SettingsPalette.ink)
         .tint(accent).background(surface)
@@ -2228,19 +2193,22 @@ struct SettingsView: View {
 
     private func tabButton(_ value: SettingsTab) -> some View {
         Button { tab = value } label: {
-            Text(value.rawValue).font(SettingsPalette.font(12, medium: tab == value))
-                .foregroundStyle(tab == value ? SettingsPalette.ink : secondaryInk)
-                .padding(.top, 6).padding(.bottom, 10)
-                .overlay(alignment: .bottom) { Rectangle().fill(tab == value ? accent : .clear).frame(height: 2) }
-                .contentShape(Rectangle())
+            HStack(spacing: 12) {
+                Image(systemName: value.symbol).font(.system(size: 15)).frame(width: 20).accessibilityHidden(true)
+                Text(value.rawValue).font(SettingsPalette.font(13, medium: tab == value))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(tab == value ? SettingsPalette.ink : secondaryInk)
+            .padding(.horizontal, 8).frame(height: 36)
+            .background(tab == value ? SettingsPalette.adaptive(0xECEAE5, 0x3B3C37) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(value == .cloud).opacity(value == .cloud ? 0.4 : 1)
-        .help(value == .cloud ? "Cloud Sync is coming later" : value.rawValue)
+        .buttonStyle(.plain).help(value.rawValue)
         .accessibilityValue(tab == value ? "Selected" : "Not selected")
     }
 
     private var general: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 24) {
             settingsSection("Deck") {
                 settingRow("Screen side", "Which edge the deck lives on") { AccentSegmentedPicker(selection: $settings.side, options: [(.left, "Left"), (.right, "Right"), (.bottom, "Bottom")], accessibilityLabel: "Screen side", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
                 settingRow("Open a note", "Choose how to open a card in the deck") { AccentSegmentedPicker(selection: $settings.fanMode, options: [(.hover, "On hover"), (.click, "On click")], accessibilityLabel: "Open a note", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
@@ -2256,13 +2224,18 @@ struct SettingsView: View {
                 }
                 settingRow("Animation speed", "How briskly the deck moves", divider: false) { AccentSegmentedPicker(selection: $settings.animationSpeed, options: [(.fast, "Fast"), (.normal, "Normal"), (.slow, "Slow")], accessibilityLabel: "Animation speed", accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark)).frame(width: 200, height: 30) }
             }
+            settingsSection("Windows & privacy") {
+                settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(accent) }
+                settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(accent) }
+                settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(accent) }
+            }
         }
     }
 
     private var calendarSettings: some View {
         VStack(alignment: .leading, spacing: 14) {
             settingsSection("Calendar wing") {
-                settingRow("Calendar wing", "Turn this off to remove the calendar completely") {
+                settingRow("Calendar wing", "Show or hide the calendar in the deck") {
                     Toggle("Calendar wing", isOn: $settings.calendarEnabled).toggleStyle(.switch).labelsHidden().tint(accent)
                 }
                 settingRow("Wing position", "Choose an end, or drag the wing directly between notes") {
@@ -2427,16 +2400,6 @@ struct SettingsView: View {
             if let error = cloudSync.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.red).frame(maxWidth: 470, alignment: .leading)
-            }
-        }
-    }
-
-    private var system: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            settingsSection("Windows") {
-                settingRow("Show in Dock", "Turn off to keep Margin in the menu bar only") { Toggle("Show in Dock", isOn: $settings.showInDock).toggleStyle(.switch).labelsHidden().tint(accent) }
-                settingRow("Show over full-screen apps", "Keep the deck reachable in full screen") { Toggle("Show over full-screen apps", isOn: $settings.showOverFullScreen).toggleStyle(.switch).labelsHidden().tint(accent) }
-                settingRow("Lock notes", "Hide note contents until you authenticate", divider: false) { Toggle("Lock notes", isOn: $settings.lockNotes).toggleStyle(.switch).labelsHidden().tint(accent) }
             }
         }
     }
@@ -2643,7 +2606,8 @@ struct SettingsView: View {
                     Button("Check Now") { updater.checkForUpdates() }.buttonStyle(SettingsButtonStyle()).fixedSize()
                 }
             }
-            settingsSection("Privacy & legal") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Privacy & legal").font(SettingsPalette.font(14, medium: true)).accessibilityAddTraits(.isHeader)
                 HStack(spacing: 12) {
                     Button("Privacy policy") { openLegal("PRIVACY") }
                     Button("License & use") { openLegal("TERMS") }
@@ -2670,9 +2634,12 @@ struct SettingsView: View {
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            content()
-        }.frame(maxWidth: .infinity, alignment: .leading).accessibilityLabel(title)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(SettingsPalette.font(14, medium: true)).accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 0) { content() }
+                .padding(.horizontal, 16).padding(.vertical, 4)
+                .background(groupSurface, in: RoundedRectangle(cornerRadius: 12))
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private func settingRow<Trailing: View>(_ title: String, _ subtitle: String, divider: Bool = true, @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 24) {
@@ -2682,7 +2649,7 @@ struct SettingsView: View {
             }
             Spacer(minLength: 0)
             trailing().fixedSize().controlSize(.small)
-        }.padding(.vertical, 6).overlay(alignment: .bottom) { rule.frame(height: divider ? 1 : 0) }
+        }.padding(.vertical, 12).overlay(alignment: .bottom) { rule.frame(height: divider ? 1 : 0) }
     }
 
     private func settingsMenu<Value: Hashable>(_ title: String, selection: Binding<Value>, options: [(Value, String)], width: CGFloat) -> some View {

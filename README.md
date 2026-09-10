@@ -103,13 +103,23 @@ Read the [Privacy Policy](PRIVACY.md), [License and Use Information](TERMS.md), 
 
 ## Build from source
 
-A full Xcode installation and internet access on the first build are required. The build downloads a pinned, checksum-verified copy of Sparkle for signed automatic updates.
+Use the installed Apple developer tools and internet access on the first build. The build downloads a pinned, checksum-verified copy of Sparkle. Full Xcode is preferred; Command Line Tools can use its bundled macOS 26.5 SDK. Set `DEVELOPER_DIR` or `SDKROOT` to select another installed toolchain or SDK.
 
 ```sh
-./scripts/package-dmg.sh
+./scripts/package-dmg.sh --build-only
 ```
 
-The script builds a universal app, runs the built-in checks, and packages a local DMG.
+This compiles for this Mac, verifies the bundle, runs self-checks, and only then replaces `build/Margin.app`. Failed builds preserve the previous app; temporary builds are removed. Concurrent builds are rejected.
+
+To build, verify, and update the one installed copy, quit Margin and run:
+
+```sh
+./scripts/package-dmg.sh --install
+```
+
+Open `/Applications/Margin.app` for normal use. Do not create separately named preview apps. Use `build/Margin.app/Contents/MacOS/Margin --ui-test --settings-test` for isolated UI checks; quit that process before installing.
+
+For a universal release app and DMG, run `./scripts/package-dmg.sh` without arguments. To verify failed-build preservation, run `python3 scripts/check-build-workflow.py` after a successful build.
 
 See [Architecture](docs/ARCHITECTURE.md), [Releasing](docs/RELEASING.md), and [Contributing](CONTRIBUTING.md).
 
