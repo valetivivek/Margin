@@ -71,7 +71,7 @@ python3 "$ROOT/scripts/package-legal.py" "$APP/Contents/Resources/Legal"
 cp -R "$ROOT/Resources/Fonts/." "$APP/Contents/Resources/Fonts/"
 cp "$SPARKLE_ROOT/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
-[[ ! -f "$ROOT/Resources/AppIcon.icns" ]] || cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+"$ROOT/scripts/package-icon.sh" "$APP/Contents/Resources/AppIcon.icns"
 if [[ -n "${CODE_SIGN_IDENTITY:-}" ]]; then
   embedded="$APP/Contents/Frameworks/Sparkle.framework"
   codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime "$embedded/Versions/B/XPCServices/Installer.xpc"
