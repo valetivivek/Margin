@@ -4,3 +4,6 @@ dist/
 Resources/Legal/
 .DS_Store
 *.xcuserstate
+
+# Local agent guidance
+/AGENTS.md

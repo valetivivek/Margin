@@ -560,7 +560,7 @@ final class AppCoordinator {
     func start() {
         // Cloud Sync is intentionally unavailable in this build.
         rebuildPanels()
-        if CommandLine.arguments.contains("--ui-test") {
+        if AppRuntime.isTest {
             if CommandLine.arguments.contains("--settings-test") { showSettings(); return }
             if CommandLine.arguments.contains("--capsule-test") { return }
             showDeck()
@@ -702,7 +702,7 @@ final class AppCoordinator {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.contentView = NSHostingView(rootView: AllNotesView(store: store, navigation: libraryNavigation, open: { [weak self] in self?.openEditor($0) }))
-        if CommandLine.arguments.contains("--ui-test"), CommandLine.arguments.contains("--minimum-size-test") { window.setContentSize(window.contentMinSize) }
+        if AppRuntime.isTest, CommandLine.arguments.contains("--minimum-size-test") { window.setContentSize(window.contentMinSize) }
         let controller = NSWindowController(window: window); allNotes = controller
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.allNotes = nil }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -748,7 +748,7 @@ final class AppCoordinator {
         let hosting = NSHostingView(rootView: SettingsView(settings: settings, store: store, cloudSync: cloudSync, updater: updater))
         hosting.sizingOptions = []
         window.contentView = hosting
-        if CommandLine.arguments.contains("--ui-test"), CommandLine.arguments.contains("--minimum-size-test") { window.setContentSize(window.contentMinSize) }
+        if AppRuntime.isTest, CommandLine.arguments.contains("--minimum-size-test") { window.setContentSize(window.contentMinSize) }
         let controller = NSWindowController(window: window); settingsWindow = controller
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in self?.settingsWindow = nil }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -793,11 +793,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         EditCommand(title: "Paste", action: #selector(NSText.paste(_:)), key: "v"),
         EditCommand(title: "Select All", action: #selector(NSText.selectAll(_:)), key: "a")
     ]
-    let settings = AppSettings(defaults: CommandLine.arguments.contains("--ui-test")
+    let settings = AppSettings(defaults: AppRuntime.isTest
         ? UserDefaults(suiteName: "margin-ui-test-\(ProcessInfo.processInfo.processIdentifier)")! : .standard)
     lazy var store = NotesStore(settings: settings)
     lazy var cloudSync = CloudSyncController(store: store, settings: settings)
-    private let updaterController = SPUStandardUpdaterController(startingUpdater: !CommandLine.arguments.contains("--ui-test"), updaterDelegate: nil, userDriverDelegate: nil)
+    private let updaterController = SPUStandardUpdaterController(startingUpdater: !AppRuntime.isTest, updaterDelegate: nil, userDriverDelegate: nil)
     lazy var coordinator = AppCoordinator(store: store, settings: settings, cloudSync: cloudSync, updater: updaterController.updater)
     private var hotKeys: HotKeyManager?
     private var shortcutObservation: AnyCancellable?
@@ -852,9 +852,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         updaterController.updater.sendsSystemProfile = false
         NSApp.appearance = settings.appearance.nsAppearance
-        NSApp.setActivationPolicy(Self.activationPolicy(showInDock: settings.showInDock, uiTest: CommandLine.arguments.contains("--ui-test")))
+        NSApp.setActivationPolicy(Self.activationPolicy(showInDock: settings.showInDock, uiTest: AppRuntime.isTest))
         NSApp.mainMenu = Self.makeMainMenu(settings: settings, target: self)
-        if !CommandLine.arguments.contains("--ui-test") { installHotKeys() }
+        if !AppRuntime.isTest { installHotKeys() }
         shortcutObservation = settings.$shortcuts.combineLatest(settings.$disabledShortcuts).dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -940,7 +940,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc fileprivate func statusCloseWindow(_ sender: Any?) { (NSApp.keyWindow ?? NSApp.mainWindow)?.performClose(sender) }
     @objc private func statusToggleDeck(_ sender: Any?) { coordinator.toggleDeckHidden() }
     @objc private func statusShowDeck(_ sender: Any?) { coordinator.showDeck() }
-    @objc private func statusCheckForUpdates(_ sender: Any?) { updaterController.checkForUpdates(sender) }
+    @objc private func statusCheckForUpdates(_ sender: Any?) { if !AppRuntime.isTest { updaterController.checkForUpdates(sender) } }
     @objc private func statusSideLeft(_ sender: Any?) { settings.side = .left }
     @objc private func statusSideRight(_ sender: Any?) { settings.side = .right }
     @objc private func statusSideBottom(_ sender: Any?) { settings.side = .bottom }

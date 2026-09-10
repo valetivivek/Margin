@@ -37,7 +37,9 @@ if [[ -z "${SDKROOT:-}" && "$SWIFTC" == /Library/Developer/CommandLineTools/* &&
 fi
 print "Building with SDK: $SDK"
 CACHE="$ROOT/.build/module-cache"
-APP="$STAGE/Margin.app"
+APP_NAME="Margin"
+[[ "$MODE" != --build-only ]] || APP_NAME="Margin Dev"
+APP="$STAGE/$APP_NAME.app"
 SPARKLE_VERSION="2.9.6"
 SPARKLE_ROOT="$ROOT/.build/sparkle-$SPARKLE_VERSION"
 SPARKLE_FRAMEWORK="$SPARKLE_ROOT/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
@@ -67,6 +69,11 @@ done
 
 lipo -create "$STAGE"/bin/Margin-* -output "$APP/Contents/MacOS/Margin"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+if [[ "$MODE" == --build-only ]]; then
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.valetivivek.margin.dev' "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleName Margin Dev' "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Margin Dev' "$APP/Contents/Info.plist"
+fi
 python3 "$ROOT/scripts/package-legal.py" "$APP/Contents/Resources/Legal"
 cp -R "$ROOT/Resources/Fonts/." "$APP/Contents/Resources/Fonts/"
 cp "$SPARKLE_ROOT/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
@@ -99,8 +106,14 @@ publish_app() {
   rm -rf "$PREVIOUS"
   PREVIOUS=""
 }
-publish_app "$APP" "$ROOT/build/Margin.app"
-APP="$ROOT/build/Margin.app"
+if [[ "$MODE" == --build-only ]]; then
+  CURRENT="$ROOT/build/Margin Dev.app"
+else
+  mkdir -p "$ROOT/.build/release.noindex"
+  CURRENT="$ROOT/.build/release.noindex/Margin.app"
+fi
+publish_app "$APP" "$CURRENT"
+APP="$CURRENT"
 print "Verified current app: $APP"
 if [[ "$MODE" == --install ]]; then
   if pgrep -x Margin >/dev/null; then

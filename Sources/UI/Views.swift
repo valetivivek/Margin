@@ -550,7 +550,7 @@ struct EdgeDeckView: View {
             ZStack(alignment: .bottom) {
                 if lifted {
                     VStack(alignment: .leading, spacing: 7) {
-                        Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(.black.opacity(0.9)).lineLimit(1)
                         Text(NoteMarkdown.preview(current, font: settings.nsNoteFont, markdown: settings.markdownEnabled))
                             .lineLimit(4)
                         Spacer(minLength: 0)
@@ -563,8 +563,8 @@ struct EdgeDeckView: View {
                     .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
                 Text(current.title.isEmpty ? "Untitled note" : current.title)
-                    .font(.system(size: 10, weight: .semibold)).lineLimit(1)
-                    .foregroundStyle(.black.opacity(0.66)).padding(.horizontal, 9)
+                    .font(.system(size: 10, weight: .bold)).lineLimit(1)
+                    .foregroundStyle(.black.opacity(0.82)).padding(.horizontal, 9)
                     .frame(width: DeckCardMetrics.bottomStep - 7, height: 30)
                     .background(current.displayColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
@@ -718,13 +718,13 @@ struct EdgeDeckView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         if model.side == .right {
-                            Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                            Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(.black.opacity(0.9)).lineLimit(1)
                             Spacer(minLength: 0)
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
                         } else {
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
                             Spacer(minLength: 0)
-                            Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                            Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(.black.opacity(0.9)).lineLimit(1)
                         }
                     }
                     VStack(alignment: .leading, spacing: 3) {
@@ -788,10 +788,11 @@ struct EdgeDeckView: View {
     }
 
     private func tabLabel(_ title: String) -> some View {
-        Text(title.isEmpty ? "Untitled note" : title)
-            .font(.system(size: 9, weight: .semibold)).foregroundStyle(.black.opacity(0.58))
+        Text((title.isEmpty ? "Untitled note" : title).uppercased())
+            .tracking(1.1)
+            .font(.system(size: 9, weight: .bold)).foregroundStyle(.black.opacity(0.82))
             .lineLimit(1).truncationMode(.tail)
-            .frame(width: DeckCardMetrics.height - 28)
+            .frame(width: DeckCardMetrics.height - 28, alignment: model.side == .right ? .trailing : .leading)
             .rotationEffect(.degrees(model.side == .right ? -90 : 90))
             .frame(width: DeckCardMetrics.tabWidth, height: DeckCardMetrics.height - 20)
             .padding(.top, 10).frame(width: DeckCardMetrics.tabWidth, height: DeckCardMetrics.height, alignment: .top)
@@ -2603,9 +2604,10 @@ struct SettingsView: View {
                     )).toggleStyle(.switch).labelsHidden().tint(accent)
                 }
                 settingRow("Check now", "Look for a new version manually", divider: false) {
-                    Button("Check Now") { updater.checkForUpdates() }.buttonStyle(SettingsButtonStyle()).fixedSize()
+                    Button("Check Now") { if !AppRuntime.isTest { updater.checkForUpdates() } }.buttonStyle(SettingsButtonStyle()).fixedSize()
                 }
             }
+            .disabled(AppRuntime.isTest)
             VStack(alignment: .leading, spacing: 12) {
                 Text("Privacy & legal").font(SettingsPalette.font(14, medium: true)).accessibilityAddTraits(.isHeader)
                 HStack(spacing: 12) {

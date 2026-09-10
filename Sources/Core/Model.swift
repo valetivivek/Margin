@@ -427,7 +427,7 @@ final class NotesStore: ObservableObject {
     init(settings: AppSettings, database: NoteDatabase? = nil) {
         self.settings = settings
         do {
-            let uiTest = CommandLine.arguments.contains("--ui-test")
+            let uiTest = AppRuntime.isTest
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent("hmn-ui-test-store-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
             self.database = try database ?? (uiTest ? NoteDatabase(directory: folder, keyData: Data(repeating: 5, count: 32)) : NoteDatabase())
             let records = try self.database.load(includeDeleted: true)

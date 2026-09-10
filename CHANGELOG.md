@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1 - 2026-09-10
+
+- Refined the README with real product screenshots and clearer installation guidance.
+- Improved note title contrast and weight in the edge deck for easier scanning on hover.
+- Hardened the development build workflow with an isolated Margin Dev identity.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.4.0 - 2026-09-09
 
 - Redesigned Settings with a left sidebar, clearer sections, and a live appearance preview. Scrolling works without visible scrollbars.

@@ -2,18 +2,22 @@
 """Run after --build-only: a failed compile must preserve the verified app."""
 import hashlib
 import os
+import plistlib
 from pathlib import Path
 import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parent.parent
-app = root / 'build/Margin.app'
+app = root / 'build/Margin Dev.app'
 
 def fingerprint():
     return {str(p.relative_to(app)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in app.rglob('*') if p.is_file() and not p.is_symlink()}
 
 assert (app / 'Contents/MacOS/Margin').exists(), 'Run --build-only first'
+info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+assert info['CFBundleIdentifier'] == 'com.valetivivek.margin.dev'
+assert info['CFBundleDisplayName'] == 'Margin Dev'
 before = fingerprint()
 with tempfile.TemporaryDirectory(prefix='margin-build-check-') as folder:
     xcrun = Path(folder) / 'xcrun'

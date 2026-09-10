@@ -24,4 +24,6 @@ The UI uses an adaptive selection palette: a darker blue in light mode, a higher
 
 `NotesStore.edit(id:)` changes the latest draft synchronously. Views bind fields to that operation; pinning and window movement patch only their own fields. The store owns timestamps and debounced persistence. Flush returns success, retaining failed drafts for retry; editor close and application quit keep unsaved work open on failure.
 
-`package-dmg.sh --build-only` verifies a staged native build before replacing `build/Margin.app`. `--install` also replaces the installed app. The default release mode builds both architectures and packages the verified app. Failed builds preserve the previous app; `python3 scripts/check-build-workflow.py` exercises that guarantee.
+`package-dmg.sh --build-only` verifies a staged native build before replacing `build/Margin Dev.app`. `--install` builds the production identity and replaces the installed app. The default release mode builds both architectures and packages the verified app. Failed builds preserve the previous app; `python3 scripts/check-build-workflow.py` exercises that guarantee.
+
+Development builds use the name Margin Dev and bundle ID `com.valetivivek.margin.dev`. They automatically use the isolated UI-test store and disable automatic updates. Release artifacts live in `.build/release.noindex` to avoid Spotlight discovery; `/Applications/Margin.app` remains the normal app.

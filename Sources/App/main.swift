@@ -1,5 +1,9 @@
 import AppKit
 
+enum AppRuntime {
+    static let isTest = Bundle.main.bundleIdentifier == "com.valetivivek.margin.dev" || CommandLine.arguments.contains("--ui-test")
+}
+
 if CommandLine.arguments.contains("--self-check") {
     _ = NSApplication.shared
     var failures: [String] = []
