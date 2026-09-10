@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.2 - 2026-09-10
+
+- Fixed note window cleanup during deletion so other notes remain available and new notes can be created afterward.
+- Added calendar reminder choices from the event start time to one day before, with a default of 10 minutes for new events. Alerts use macOS Calendar notifications.
+- Preserved existing custom and multiple calendar reminders unless explicitly changed.
+- Added regression checks for deleting and creating notes, preserving other stored notes, and reminder timing.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.4.1 - 2026-09-10
 
 - Refined the README with real product screenshots and clearer installation guidance.

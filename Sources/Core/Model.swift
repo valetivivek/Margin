@@ -849,9 +849,18 @@ enum SelfCheck {
         guard store.archive(edited.id), store.restore(edited.id), store.note(edited.id)?.body == "archive pending draft" else {
             throw SelfCheckFailure("Archive loses pending edits")
         }
+        let survivors = store.notes.filter { $0.id != edited.id }
         store.edit(edited.id) { $0.body = "delete pending draft" }
         guard store.delete(edited.id), store.flush(edited.id), store.note(edited.id) == nil else {
             throw SelfCheckFailure("A pending save resurrects a deleted note")
+        }
+        guard store.notes == survivors,
+              Set(try editDB.load().map(\.id)) == Set(survivors.map(\.id)) else {
+            throw SelfCheckFailure("Deleting one note changes other notes")
+        }
+        let createdAfterDelete = store.create()
+        guard store.note(createdAfterDelete.id) != nil, store.saveState(createdAfterDelete.id) == .saved else {
+            throw SelfCheckFailure("Cannot create a note after deleting another")
         }
         store.undoDelete()
         guard store.note(edited.id)?.body == "delete pending draft" else { throw SelfCheckFailure("Undo loses the latest draft") }

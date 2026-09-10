@@ -59,7 +59,12 @@ final class CalendarAgenda: ObservableObject {
         current.isEmpty || current.contains(saved) ? current : current + [saved]
     }
 
-    func saveEvent(_ existing: EKEvent? = nil, title: String, start: Date, end: Date, allDay: Bool, calendarID: String) throws {
+    static func reminderAlarms(minutes: Int) -> [EKAlarm]? {
+        if minutes == -2 { return nil } // Preserve existing alarms.
+        return minutes < 0 ? [] : [EKAlarm(relativeOffset: -Double(minutes) * 60)]
+    }
+
+    func saveEvent(_ existing: EKEvent? = nil, title: String, start: Date, end: Date, allDay: Bool, calendarID: String, alarms: [EKAlarm]? = nil) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, let dates = Self.eventDates(start: start, end: end, allDay: allDay) else {
             throw NSError(domain: "Margin.Calendar", code: 1, userInfo: [NSLocalizedDescriptionKey: "Add a title and make sure the end is after the start."])
@@ -73,6 +78,7 @@ final class CalendarAgenda: ObservableObject {
         let event = existing ?? EKEvent(eventStore: store)
         event.title = title; event.startDate = dates.0; event.endDate = dates.1
         event.isAllDay = allDay; event.calendar = selected
+        if let alarms { event.alarms = alarms }
         try store.save(event, span: .thisEvent, commit: true)
         calendarIDs = Self.visibleCalendarIDs(current: calendarIDs, saved: selected.calendarIdentifier)
         refresh()
@@ -343,6 +349,7 @@ private struct CalendarEventComposer: View {
     @State private var calendarID: String
     @State private var error: String?
     @State private var confirmingDelete = false
+    @State private var reminder: Int
 
     init(agenda: CalendarAgenda, date: Date, event: EKEvent? = nil, preferredCalendarID: String, color: Color) {
         self.agenda = agenda; self.event = event; self.color = color
@@ -351,6 +358,8 @@ private struct CalendarEventComposer: View {
         _title = State(initialValue: event?.title ?? "")
         _start = State(initialValue: start); _end = State(initialValue: event?.endDate ?? start.addingTimeInterval(3600))
         _allDay = State(initialValue: event?.isAllDay ?? false)
+        // Preserve custom and multiple alarms unless the user changes the reminder.
+        _reminder = State(initialValue: event == nil ? 10 : -2)
         let requested = event?.calendar.calendarIdentifier ?? preferredCalendarID
         let preferred = agenda.writableCalendars.contains { $0.calendarIdentifier == requested }
             ? requested : agenda.writableCalendars.first?.calendarIdentifier ?? ""
@@ -368,6 +377,19 @@ private struct CalendarEventComposer: View {
             Toggle("All-day event", isOn: $allDay)
             DatePicker("Starts", selection: $start, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute])
             DatePicker("Ends", selection: $end, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute])
+            Picker("Reminder", selection: $reminder) {
+                if event != nil { Text("Keep existing reminders").tag(-2) }
+                Text("None").tag(-1)
+                Text("At time of event").tag(0)
+                Text("5 minutes before").tag(5)
+                Text("10 minutes before").tag(10)
+                Text("15 minutes before").tag(15)
+                Text("30 minutes before").tag(30)
+                Text("1 hour before").tag(60)
+                Text("1 day before").tag(1440)
+            }
+            Text("Alerts appear through macOS Calendar. Enable Calendar notifications in System Settings.")
+                .font(SettingsPalette.font(11)).foregroundStyle(.secondary)
             Picker(event == nil ? "Save to" : "Sync changes to", selection: $calendarID) {
                 ForEach(agenda.writableCalendars, id: \.calendarIdentifier) { calendar in
                     Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
@@ -379,7 +401,7 @@ private struct CalendarEventComposer: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button(event == nil ? "Add Event" : "Save Changes") {
-                    do { try agenda.saveEvent(event, title: title, start: start, end: end, allDay: allDay, calendarID: calendarID); dismiss() }
+                    do { try agenda.saveEvent(event, title: title, start: start, end: end, allDay: allDay, calendarID: calendarID, alarms: CalendarAgenda.reminderAlarms(minutes: reminder)); dismiss() }
                     catch { self.error = error.localizedDescription }
                 }
                 .keyboardShortcut(.defaultAction)

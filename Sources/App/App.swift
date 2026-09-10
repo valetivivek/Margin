@@ -679,7 +679,11 @@ final class AppCoordinator {
             settings.lastOpenNoteID = id
             let controller = StickyWindowController(note: note, screen: targetScreen, store: store, settings: settings, coordinator: self)
             editors[id] = controller
-            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: controller.window, queue: .main) { [weak self] _ in self?.editors[id] = nil }
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: controller.window, queue: .main) { [weak self] _ in
+                // Keep the controller alive until AppKit finishes closing its window.
+                let closing = self?.editors.removeValue(forKey: id)
+                DispatchQueue.main.async { withExtendedLifetime(closing) {} }
+            }
         }
         guard settings.lockNotes else { show(); return }
         let context = LAContext()
@@ -973,6 +977,27 @@ enum AppSelfCheck {
         let coordinator = AppCoordinator(store: store, settings: settings, cloudSync: sync, updater: updates.updater)
         let deck = EdgePanelController(screen: screen, store: store, settings: settings, coordinator: coordinator)
         defer { deck.close() }
+        let survivorIDs = Set(store.notes.map(\.id))
+        let deleted = store.create()
+        coordinator.openEditor(deleted.id)
+        RunLoop.current.run(until: Date().addingTimeInterval(settings.cardDuration + 0.1))
+        guard let editor = NSApp.windows.compactMap({ $0.contentView as? NSHostingView<NoteEditorView> })
+            .first(where: { $0.rootView.noteID == deleted.id }) else {
+            throw SelfCheckFailure("Cannot open the note deletion regression editor")
+        }
+        editor.rootView.delete()
+        RunLoop.current.run(until: Date().addingTimeInterval(settings.cardDuration + 0.2))
+        guard Set(store.notes.map(\.id)) == survivorIDs else {
+            throw SelfCheckFailure("Editor deletion changes unrelated notes")
+        }
+        coordinator.createNote()
+        guard let createdID = settings.lastOpenNoteID, store.note(createdID) != nil,
+              let reopened = NSApp.windows.first(where: {
+                  ($0.contentView as? NSHostingView<NoteEditorView>)?.rootView.noteID == createdID && $0.isVisible
+              }) else {
+            throw SelfCheckFailure("Cannot create and open a note after deletion")
+        }
+        reopened.close()
         coordinator.showAllNotes()
         guard let library = NSApp.windows.first(where: { $0.title == "All Notes" }),
               let hosting = library.contentView as? NSHostingView<AllNotesView> else {
@@ -1440,6 +1465,12 @@ enum AppSelfCheck {
         let dstDay = dstCalendar.date(from: DateComponents(year: 2026, month: 3, day: 8))!
         guard CalendarAgenda.dayRange(dstDay, calendar: dstCalendar).duration == 23 * 3600 else {
             throw SelfCheckFailure("Calendar date navigation loses daylight-saving boundaries")
+        }
+        guard CalendarAgenda.reminderAlarms(minutes: -2) == nil,
+              CalendarAgenda.reminderAlarms(minutes: -1)?.isEmpty == true,
+              CalendarAgenda.reminderAlarms(minutes: 0)?.first?.relativeOffset == 0,
+              CalendarAgenda.reminderAlarms(minutes: 10)?.first?.relativeOffset == -600 else {
+            throw SelfCheckFailure("Calendar reminder offsets or preservation are incorrect")
         }
         let invalidEvent = CalendarAgenda.eventDates(start: dstDay, end: dstDay.addingTimeInterval(-1), allDay: false, calendar: dstCalendar)
         let allDayEvent = CalendarAgenda.eventDates(start: dstDay.addingTimeInterval(3600), end: dstDay, allDay: true, calendar: dstCalendar)
