@@ -148,7 +148,7 @@ final class AppSettings: ObservableObject {
         fontName = defaults.string(forKey: "fontName") ?? "Helvetica"
         textSize = defaults.object(forKey: "textSize") as? Double ?? 21
         animationSpeed = AnimationSpeed(rawValue: defaults.string(forKey: "animationSpeed") ?? "normal") ?? .normal
-        calendarEnabled = defaults.bool(forKey: "calendarEnabled")
+        calendarEnabled = defaults.object(forKey: "calendarEnabled") as? Bool ?? true
         calendarPosition = defaults.object(forKey: "calendarPosition") as? Int
             ?? ((defaults.object(forKey: "calendarFirst") as? Bool ?? true) ? 0 : Int.max)
         let savedCalendarID = defaults.string(forKey: "calendarID") ?? ""
@@ -724,7 +724,7 @@ enum SelfCheck {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let storeSettings = AppSettings(defaults: defaults)
-        guard !storeSettings.markdownEnabled, storeSettings.markdownPreviewDelay == 5, storeSettings.activationDelay == 0.05, storeSettings.deckPosition == 0.5, storeSettings.display == "main", storeSettings.fontName == "Helvetica", !storeSettings.showInDock, storeSettings.showOverFullScreen else {
+        guard !storeSettings.markdownEnabled, storeSettings.markdownPreviewDelay == 5, storeSettings.activationDelay == 0.05, storeSettings.deckPosition == 0.5, storeSettings.display == "main", storeSettings.fontName == "Helvetica", !storeSettings.showInDock, storeSettings.showOverFullScreen, storeSettings.calendarEnabled else {
             throw SelfCheckFailure("New deck defaults are incorrect")
         }
         storeSettings.showOverFullScreen = false

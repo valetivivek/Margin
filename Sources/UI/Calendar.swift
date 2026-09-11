@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import EventKit
 import Combine
+import UserNotifications
 
 // This item is a deck presentation only; it is never stored or exported as a note.
 enum CalendarWing {
@@ -23,6 +24,46 @@ enum CalendarWing {
         let current = min(max(0, position), maximum)
         let (moved, overflow) = current.addingReportingOverflow(step)
         return overflow ? (step > 0 ? maximum : 0) : min(max(0, moved), maximum)
+    }
+}
+
+enum CalendarAlerts {
+    private static func notificationID(_ eventID: String) -> String { "margin-calendar-\(eventID)" }
+
+    static func fireDate(start: Date, alarms: [EKAlarm]?) -> Date? {
+        alarms?.compactMap { alarm in alarm.absoluteDate ?? start.addingTimeInterval(alarm.relativeOffset) }.min()
+    }
+
+    static func sync(_ event: EKEvent, replacing oldEventID: String? = nil) {
+        let center = UNUserNotificationCenter.current()
+        if let oldEventID { remove(oldEventID) }
+        guard let eventID = event.eventIdentifier,
+              let fireDate = fireDate(start: event.startDate, alarms: event.alarms), fireDate > Date() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = event.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Calendar event"
+        content.body = fireDate == event.startDate
+            ? "Starts now · \(event.calendar.title)"
+            : "Starts at \(event.startDate.formatted(date: .omitted, time: .shortened)) · \(event.calendar.title)"
+        content.sound = .default
+        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireDate)
+        let request = UNNotificationRequest(identifier: notificationID(eventID), content: content,
+                                            trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false))
+        let schedule = { center.add(request, withCompletionHandler: nil) }
+        center.getNotificationSettings { settings in
+            if settings.authorizationStatus == .notDetermined {
+                center.requestAuthorization(options: [.alert, .sound]) { allowed, _ in if allowed { schedule() } }
+            } else if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
+                schedule()
+            }
+        }
+    }
+
+    static func remove(_ eventID: String?) {
+        guard let eventID else { return }
+        let center = UNUserNotificationCenter.current()
+        let ids = [notificationID(eventID)]
+        center.removePendingNotificationRequests(withIdentifiers: ids)
+        center.removeDeliveredNotifications(withIdentifiers: ids)
     }
 }
 
@@ -55,6 +96,15 @@ final class CalendarAgenda: ObservableObject {
         return end > start ? (start, end) : nil
     }
 
+    static func defaultEventStart(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> Date {
+        guard calendar.isDate(date, inSameDayAs: now) else {
+            return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: date) ?? date
+        }
+        let minute = calendar.component(.minute, from: now)
+        let rounded = calendar.dateInterval(of: .minute, for: now)?.start ?? now
+        return calendar.date(byAdding: .minute, value: 30 - minute % 30, to: rounded) ?? now
+    }
+
     static func visibleCalendarIDs(current: [String], saved: String) -> [String] {
         current.isEmpty || current.contains(saved) ? current : current + [saved]
     }
@@ -75,11 +125,13 @@ final class CalendarAgenda: ObservableObject {
         guard let selected, selected.allowsContentModifications else {
             throw NSError(domain: "Margin.Calendar", code: 2, userInfo: [NSLocalizedDescriptionKey: "No writable calendar is available. Add one in macOS Calendar first."])
         }
+        let oldEventID = existing?.eventIdentifier
         let event = existing ?? EKEvent(eventStore: store)
         event.title = title; event.startDate = dates.0; event.endDate = dates.1
         event.isAllDay = allDay; event.calendar = selected
         if let alarms { event.alarms = alarms }
         try store.save(event, span: .thisEvent, commit: true)
+        CalendarAlerts.sync(event, replacing: oldEventID)
         calendarIDs = Self.visibleCalendarIDs(current: calendarIDs, saved: selected.calendarIdentifier)
         refresh()
     }
@@ -88,7 +140,9 @@ final class CalendarAgenda: ObservableObject {
         guard event.calendar.allowsContentModifications else {
             throw NSError(domain: "Margin.Calendar", code: 3, userInfo: [NSLocalizedDescriptionKey: "This calendar does not allow changes."])
         }
+        let eventID = event.eventIdentifier
         try store.remove(event, span: .thisEvent, commit: true)
+        CalendarAlerts.remove(eventID)
         refresh()
     }
 
@@ -160,7 +214,7 @@ struct CalendarAgendaView: View {
     let close: () -> Void
     let openSettings: () -> Void
     private var calendar: Calendar { .current }
-    private var accent: Color { Color(nsColor: settings.interfaceColor.nsColor(isDark: false)) }
+    private var accent: Color { Color(nsColor: .controlAccentColor) }
     private var selectedCalendarName: String {
         if agenda.calendarIDs.isEmpty { return "All calendars" }
         if agenda.calendarIDs.count == 1 {
@@ -194,8 +248,11 @@ struct CalendarAgendaView: View {
                 Button { moveMonth(-1) } label: { Image(systemName: "chevron.left") }.accessibilityLabel("Previous month")
                 Button("Today") { agenda.date = Date() }
                 Button { moveMonth(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next month")
-                Button { eventDraft = CalendarEventDraft(date: Date()) } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("New event").disabled(!agenda.authorized || agenda.writableCalendars.isEmpty)
+                Button { eventDraft = CalendarEventDraft(date: Date()) } label: {
+                    Label("New event", systemImage: "plus").padding(.horizontal, 2)
+                }
+                .buttonStyle(.borderedProminent).tint(accent)
+                .disabled(!agenda.authorized || agenda.writableCalendars.isEmpty)
                 DragHandle(accessibilityLabel: "Move calendar").frame(width: 34, height: 30).help("Drag to move the calendar anywhere")
             }
             .buttonStyle(CalendarControlStyle()).padding(.horizontal, 18).frame(height: 58)
@@ -212,9 +269,9 @@ struct CalendarAgendaView: View {
                     ForEach(CalendarAgenda.monthDays(agenda.date), id: \.self) { day in dayCell(day) }
                 }
             }
-            .background(.white.opacity(0.24), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.34)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.black.opacity(0.08)))
             .overlay {
                 if !agenda.authorized {
                     VStack(spacing: 10) {
@@ -232,8 +289,6 @@ struct CalendarAgendaView: View {
                 Text(agenda.refreshed.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" } ?? "Events sync through macOS Calendar")
                     .font(SettingsPalette.font(10)).foregroundStyle(.black.opacity(0.45))
                 Spacer()
-                Button("New Event") { eventDraft = CalendarEventDraft(date: Date()) }
-                    .disabled(!agenda.authorized || agenda.writableCalendars.isEmpty)
                 Button("Calendar Settings", action: openSettings)
                 Button("Open in Calendar", action: CalendarAgenda.openCalendar)
                 if agenda.authorized {
@@ -243,7 +298,7 @@ struct CalendarAgendaView: View {
             .buttonStyle(CalendarControlStyle()).padding(.horizontal, 18).frame(height: 52)
         }
         .frame(minWidth: 620, minHeight: 540)
-        .foregroundStyle(.black.opacity(0.76)).background(settings.calendarColor.color)
+        .foregroundStyle(.black.opacity(0.76)).background(Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .environment(\.colorScheme, .light)
         .onAppear { agenda.calendarIDs = settings.calendarVisibleIDs; agenda.refresh() }
@@ -251,15 +306,20 @@ struct CalendarAgendaView: View {
         .onChange(of: settings.calendarVisibleIDs) { value in agenda.calendarIDs = value; agenda.refresh() }
         .onChange(of: agenda.calendarIDs) { value in if settings.calendarVisibleIDs != value { settings.calendarVisibleIDs = value } }
         .sheet(item: $eventDraft) { draft in
-            CalendarEventComposer(agenda: agenda, date: draft.date, event: draft.event, preferredCalendarID: settings.calendarID,
-                                  color: settings.calendarColor.color)
+            CalendarEventComposer(agenda: agenda, date: draft.date, event: draft.event, preferredCalendarID: settings.calendarID)
         }
     }
 
     private func dayCell(_ day: Date) -> some View {
         let events = agenda.events(on: day)
         let inMonth = calendar.isDate(day, equalTo: agenda.date, toGranularity: .month)
-        return Button { selectedDay = day } label: {
+        return Button {
+            if events.isEmpty, agenda.authorized, !agenda.writableCalendars.isEmpty {
+                eventDraft = CalendarEventDraft(date: day)
+            } else {
+                selectedDay = day
+            }
+        } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text("\(calendar.component(.day, from: day))")
                     .font(SettingsPalette.font(12, medium: calendar.isDateInToday(day)))
@@ -285,6 +345,7 @@ struct CalendarAgendaView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(day.formatted(date: .complete, time: .omitted)), \(events.count) events")
+        .accessibilityHint(events.isEmpty ? "Creates an event" : "Shows events")
         .popover(isPresented: Binding(get: { selectedDay == day }, set: { if !$0 { selectedDay = nil } })) {
             VStack(alignment: .leading, spacing: 12) {
                 Text(day.formatted(date: .complete, time: .omitted)).font(SettingsPalette.font(15, medium: true))
@@ -341,7 +402,6 @@ private struct CalendarEventComposer: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var agenda: CalendarAgenda
     let event: EKEvent?
-    let color: Color
     @State private var title: String
     @State private var start: Date
     @State private var end: Date
@@ -350,16 +410,16 @@ private struct CalendarEventComposer: View {
     @State private var error: String?
     @State private var confirmingDelete = false
     @State private var reminder: Int
+    @FocusState private var titleFocused: Bool
 
-    init(agenda: CalendarAgenda, date: Date, event: EKEvent? = nil, preferredCalendarID: String, color: Color) {
-        self.agenda = agenda; self.event = event; self.color = color
-        let calendar = Calendar.current
-        let start = event?.startDate ?? calendar.date(bySettingHour: 9, minute: 0, second: 0, of: date) ?? date
+    init(agenda: CalendarAgenda, date: Date, event: EKEvent? = nil, preferredCalendarID: String) {
+        self.agenda = agenda; self.event = event
+        let start = event?.startDate ?? CalendarAgenda.defaultEventStart(for: date)
         _title = State(initialValue: event?.title ?? "")
         _start = State(initialValue: start); _end = State(initialValue: event?.endDate ?? start.addingTimeInterval(3600))
         _allDay = State(initialValue: event?.isAllDay ?? false)
         // Preserve custom and multiple alarms unless the user changes the reminder.
-        _reminder = State(initialValue: event == nil ? 10 : -2)
+        _reminder = State(initialValue: event == nil ? 0 : -2)
         let requested = event?.calendar.calendarIdentifier ?? preferredCalendarID
         let preferred = agenda.writableCalendars.contains { $0.calendarIdentifier == requested }
             ? requested : agenda.writableCalendars.first?.calendarIdentifier ?? ""
@@ -367,50 +427,110 @@ private struct CalendarEventComposer: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: event == nil ? "calendar.badge.plus" : "calendar.badge.clock").font(.system(size: 18, weight: .semibold))
-                Text(event == nil ? "New event" : "Edit event").font(SettingsPalette.font(20, medium: true))
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: event == nil ? "calendar.badge.plus" : "calendar.badge.clock")
+                    .font(.system(size: 18, weight: .semibold)).foregroundStyle(.black.opacity(0.62))
+                    .frame(width: 38, height: 38).background(Color(nsColor: .controlBackgroundColor), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(event == nil ? "New event" : "Edit event").font(SettingsPalette.font(21, medium: true))
+                    Text(event == nil ? "Add it to your schedule" : "Update the calendar event")
+                        .font(SettingsPalette.font(11)).foregroundStyle(.black.opacity(0.46))
+                }
                 Spacer()
             }
-            TextField("Event title", text: $title).textFieldStyle(.roundedBorder)
-            Toggle("All-day event", isOn: $allDay)
-            DatePicker("Starts", selection: $start, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute])
-            DatePicker("Ends", selection: $end, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute])
-            Picker("Reminder", selection: $reminder) {
-                if event != nil { Text("Keep existing reminders").tag(-2) }
-                Text("None").tag(-1)
-                Text("At time of event").tag(0)
-                Text("5 minutes before").tag(5)
-                Text("10 minutes before").tag(10)
-                Text("15 minutes before").tag(15)
-                Text("30 minutes before").tag(30)
-                Text("1 hour before").tag(60)
-                Text("1 day before").tag(1440)
-            }
-            Text("Alerts appear through macOS Calendar. Enable Calendar notifications in System Settings.")
-                .font(SettingsPalette.font(11)).foregroundStyle(.secondary)
-            Picker(event == nil ? "Save to" : "Sync changes to", selection: $calendarID) {
-                ForEach(agenda.writableCalendars, id: \.calendarIdentifier) { calendar in
-                    Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
+            .padding(.horizontal, 24).padding(.vertical, 18)
+            Divider().opacity(0.16)
+            VStack(alignment: .leading, spacing: 16) {
+                TextField("What’s happening?", text: $title)
+                    .textFieldStyle(.plain).font(SettingsPalette.font(22, medium: true))
+                    .padding(.horizontal, 16).frame(height: 52)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.black.opacity(titleFocused ? 0.20 : 0.07)))
+                    .focused($titleFocused)
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Label("All day", systemImage: "sun.max").font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        Toggle("All day", isOn: $allDay).labelsHidden().toggleStyle(.switch)
+                    }.frame(height: 42)
+                    Divider().opacity(0.12)
+                    HStack {
+                        Label("Starts", systemImage: "arrow.right.circle").font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        DatePicker("Starts", selection: $start, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute]).labelsHidden()
+                    }.frame(height: 42)
+                    Divider().opacity(0.12)
+                    HStack {
+                        Label("Ends", systemImage: "checkmark.circle").font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        DatePicker("Ends", selection: $end, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute]).labelsHidden()
+                    }.frame(height: 42)
+                }
+                .padding(.horizontal, 16)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Label("Alert", systemImage: "bell").font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        Picker("Alert", selection: $reminder) {
+                            if event != nil { Text("Keep existing reminders").tag(-2) }
+                            Text("None").tag(-1)
+                            Text("At time of event").tag(0)
+                            Text("5 minutes before").tag(5)
+                            Text("10 minutes before").tag(10)
+                            Text("15 minutes before").tag(15)
+                            Text("30 minutes before").tag(30)
+                            Text("1 hour before").tag(60)
+                            Text("1 day before").tag(1440)
+                        }.labelsHidden().frame(width: 190)
+                    }.frame(height: 42)
+                    Divider().opacity(0.12)
+                    HStack {
+                        Label("Calendar", systemImage: "calendar").font(SettingsPalette.font(13, medium: true))
+                        Spacer()
+                        Picker("Calendar", selection: $calendarID) {
+                            ForEach(agenda.writableCalendars, id: \.calendarIdentifier) { calendar in
+                                Text("\(calendar.title) · \(calendar.source.title)").tag(calendar.calendarIdentifier)
+                            }
+                        }.labelsHidden().frame(width: 250)
+                    }.frame(height: 42)
+                }
+                .padding(.horizontal, 16)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                Text("Margin will notify you with sound. Allow Notifications when asked.")
+                    .font(SettingsPalette.font(11)).foregroundStyle(.black.opacity(0.46))
+                if let error {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(SettingsPalette.font(11, medium: true)).foregroundStyle(.red)
                 }
             }
-            if let error { Text(error).font(SettingsPalette.font(11)).foregroundStyle(.red) }
+            .padding(24)
+            Divider().opacity(0.16)
             HStack {
-                if event != nil { Button("Delete", role: .destructive) { confirmingDelete = true }.foregroundStyle(.red) }
+                if event != nil {
+                    Button("Delete event", role: .destructive) { confirmingDelete = true }.foregroundStyle(.red)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button(event == nil ? "Add Event" : "Save Changes") {
                     do { try agenda.saveEvent(event, title: title, start: start, end: end, allDay: allDay, calendarID: calendarID, alarms: CalendarAgenda.reminderAlarms(minutes: reminder)); dismiss() }
                     catch { self.error = error.localizedDescription }
                 }
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || calendarID.isEmpty || (!allDay && end <= start))
             }
+            .padding(.horizontal, 24).frame(height: 64)
         }
         .font(SettingsPalette.font(13)).foregroundStyle(.black.opacity(0.76))
-        .padding(22).frame(width: 430).background(color)
+        .frame(width: 520).background(Color(nsColor: .windowBackgroundColor))
         .environment(\.colorScheme, .light)
+        .onAppear { titleFocused = true }
+        .onChange(of: start) { value in if !allDay && end <= value { end = value.addingTimeInterval(3600) } }
         .confirmationDialog("Delete this event?", isPresented: $confirmingDelete) {
             Button("Delete Event", role: .destructive) {
                 guard let event else { return }

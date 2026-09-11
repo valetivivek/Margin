@@ -59,7 +59,7 @@ fi
 
 mkdir -p "$CACHE" "$APP/Contents/MacOS" "$APP/Contents/Resources/Fonts" "$APP/Contents/Frameworks" "$STAGE/bin"
 sources=("$ROOT"/Sources/**/*.swift(N))
-common=(-sdk "$SDK" -swift-version 5 -O -F "${SPARKLE_FRAMEWORK:h}" -framework Sparkle -framework AppKit -framework EventKit -framework SwiftUI -framework Combine -framework CryptoKit -framework Security -framework LocalAuthentication -framework ServiceManagement -framework Carbon -Xlinker -rpath -Xlinker @executable_path/../Frameworks -lsqlite3)
+common=(-sdk "$SDK" -swift-version 5 -O -F "${SPARKLE_FRAMEWORK:h}" -framework Sparkle -framework AppKit -framework EventKit -framework UserNotifications -framework SwiftUI -framework Combine -framework CryptoKit -framework Security -framework LocalAuthentication -framework ServiceManagement -framework Carbon -Xlinker -rpath -Xlinker @executable_path/../Frameworks -lsqlite3)
 
 architectures=(arm64 x86_64)
 [[ "$MODE" == release ]] || architectures=("$(uname -m)")

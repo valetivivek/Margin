@@ -6,6 +6,7 @@ import QuartzCore
 import ServiceManagement
 import Sparkle
 import SwiftUI
+import UserNotifications
 
 extension AppearanceMode {
     var nsAppearance: NSAppearance? {
@@ -782,7 +783,7 @@ final class AppCoordinator {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     struct EditCommand {
         let title: String
         let action: Selector
@@ -854,6 +855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
         updaterController.updater.sendsSystemProfile = false
         NSApp.appearance = settings.appearance.nsAppearance
         NSApp.setActivationPolicy(Self.activationPolicy(showInDock: settings.showInDock, uiTest: AppRuntime.isTest))
@@ -874,6 +876,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         installStatusItem()
         coordinator.start()
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 
     static func activationPolicy(showInDock: Bool, uiTest: Bool) -> NSApplication.ActivationPolicy { showInDock ? .regular : .accessory }
@@ -1466,11 +1473,25 @@ enum AppSelfCheck {
         guard CalendarAgenda.dayRange(dstDay, calendar: dstCalendar).duration == 23 * 3600 else {
             throw SelfCheckFailure("Calendar date navigation loses daylight-saving boundaries")
         }
+        let now = dstCalendar.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 10, minute: 12, second: 42))!
+        let later = CalendarAgenda.defaultEventStart(for: now, now: now, calendar: dstCalendar)
+        let tomorrow = dstCalendar.date(byAdding: .day, value: 1, to: now)!
+        guard dstCalendar.component(.hour, from: later) == 10,
+              dstCalendar.component(.minute, from: later) == 30,
+              dstCalendar.component(.second, from: later) == 0,
+              dstCalendar.component(.hour, from: CalendarAgenda.defaultEventStart(for: tomorrow, now: now, calendar: dstCalendar)) == 9 else {
+            throw SelfCheckFailure("New calendar events do not start at a useful time")
+        }
         guard CalendarAgenda.reminderAlarms(minutes: -2) == nil,
               CalendarAgenda.reminderAlarms(minutes: -1)?.isEmpty == true,
               CalendarAgenda.reminderAlarms(minutes: 0)?.first?.relativeOffset == 0,
               CalendarAgenda.reminderAlarms(minutes: 10)?.first?.relativeOffset == -600 else {
             throw SelfCheckFailure("Calendar reminder offsets or preservation are incorrect")
+        }
+        guard CalendarAlerts.fireDate(start: now, alarms: CalendarAgenda.reminderAlarms(minutes: 0)) == now,
+              CalendarAlerts.fireDate(start: now, alarms: CalendarAgenda.reminderAlarms(minutes: 10)) == now.addingTimeInterval(-600),
+              CalendarAlerts.fireDate(start: now, alarms: CalendarAgenda.reminderAlarms(minutes: -1)) == nil else {
+            throw SelfCheckFailure("Calendar app notification times are incorrect")
         }
         let invalidEvent = CalendarAgenda.eventDates(start: dstDay, end: dstDay.addingTimeInterval(-1), allDay: false, calendar: dstCalendar)
         let allDayEvent = CalendarAgenda.eventDates(start: dstDay.addingTimeInterval(3600), end: dstDay, allDay: true, calendar: dstCalendar)

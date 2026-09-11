@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.3 - 2026-09-11
+
+- Reworked event creation with a focused form, one-click creation from empty dates, sensible default times, and an at-time alert by default.
+- Added Margin notifications with the system sound for calendar alerts. Editing an event reschedules its notification, and deleting it cancels the notification.
+- Replaced the calendar wing with a compact square that stays enabled, sits above note wings, and remains clickable without hover highlighting.
+- Gave Calendar a neutral macOS appearance independent of the wing color, enabled high-resolution rendering, and hid the note editor scrollbar without disabling scrolling.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.4.2 - 2026-09-10
 
 - Fixed note window cleanup during deletion so other notes remain available and new notes can be created afterward.

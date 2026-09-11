@@ -678,15 +678,13 @@ struct EdgeDeckView: View {
 
     private func calendarSlot(index: Int) -> some View {
         Button { open(CalendarWing.id) } label: {
-            VStack(spacing: 5) {
-                Image(systemName: "calendar").font(.system(size: 15, weight: .medium))
-                if model.side != .bottom { Text(Date().formatted(.dateTime.day())).font(.system(size: 13, weight: .semibold)) }
-            }
+            Image(systemName: "calendar").font(.system(size: 14, weight: .semibold))
             .foregroundStyle(.black.opacity(0.75))
-            .frame(width: model.side == .bottom ? DeckCardMetrics.bottomStep - 7 : 34,
-                   height: model.side == .bottom ? 30 : DeckCardMetrics.height)
-            .background(settings.calendarColor.color, in: RoundedRectangle(cornerRadius: 10))
+            .frame(width: 34, height: 34)
+            .background(settings.calendarColor.color, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.08)))
             .contentShape(Rectangle())
+            .offset(y: model.side == .bottom ? -10 : -18)
         }
         .buttonStyle(.plain)
         .frame(width: model.side == .bottom ? DeckCardMetrics.bottomStep : DeckCardMetrics.visibleWidth,
@@ -694,12 +692,12 @@ struct EdgeDeckView: View {
                alignment: model.side == .bottom ? .bottom : model.side == .right ? .trailing : .leading)
         .overlay(alignment: model.side == .bottom ? .bottom : model.side == .right ? .trailing : .leading) {
             cardInteraction(CalendarWing.item(color: settings.calendarColor), lifted: false)
-                .frame(width: model.side == .bottom ? DeckCardMetrics.bottomStep : 34,
-                       height: model.side == .bottom ? 30 : DeckCardMetrics.height)
+                .frame(width: 34, height: 34)
+                .offset(y: model.side == .bottom ? -10 : -18)
                 .transaction { $0.animation = nil }
         }
         .opacity(model.fanVisible ? 1 : 0)
-        .zIndex(Double(index))
+        .zIndex(30)
         .contextMenu { Button("Open Calendar") { open(CalendarWing.id) }; Button("Calendar Settings…", action: showSettings) }
         .accessibilityLabel("Calendar").help("Click to open the month calendar")
     }
@@ -1425,7 +1423,7 @@ struct ChecklistTextEditor: NSViewRepresentable {
     let handle: ChecklistEditorHandle
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false; scroll.scrollerStyle = .overlay; scroll.autohidesScrollers = true; scroll.verticalScroller?.controlSize = .mini; scroll.scrollerKnobStyle = .dark; scroll.verticalScroller?.appearance = NSAppearance(named: .aqua)
+        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.borderType = .noBorder; scroll.focusRingType = .none; scroll.hasVerticalScroller = false; scroll.hasHorizontalScroller = false
         let view = ChecklistNSTextView(); view.drawsBackground = false; view.isRichText = !markdownEnabled; view.importsGraphics = false; view.allowsUndo = true; view.usesFindPanel = true; view.isIncrementalSearchingEnabled = true; view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
         view.isContinuousSpellCheckingEnabled = true; view.isGrammarCheckingEnabled = true
         view.isAutomaticSpellingCorrectionEnabled = true
