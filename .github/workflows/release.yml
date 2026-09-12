@@ -25,43 +25,6 @@ jobs:
             echo "Margin releases must be public because installed apps cannot authenticate to the Sparkle feed."
             exit 1
           fi
-      - name: Import Developer ID certificate
-        env:
-          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          test -n "$APPLE_CERTIFICATE_BASE64"
-          test -n "$APPLE_CERTIFICATE_PASSWORD"
-          test -n "$KEYCHAIN_PASSWORD"
-          certificate="$RUNNER_TEMP/developer-id.p12"
-          keychain="$RUNNER_TEMP/margin-signing.keychain-db"
-          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
-          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security -t cert -f pkcs12 -k "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain"
-          security list-keychains -d user -s "$keychain"
-          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application:/ { print $2; exit }')"
-          test -n "$identity"
-          echo "CODE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-      - name: Configure notarization
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          test -n "$APPLE_ID"
-          test -n "$APPLE_APP_PASSWORD"
-          test -n "$APPLE_TEAM_ID"
-          xcrun notarytool store-credentials margin-notary \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --keychain "$RUNNER_TEMP/margin-signing.keychain-db"
-          echo "NOTARY_PROFILE=margin-notary" >> "$GITHUB_ENV"
-          echo "NOTARY_KEYCHAIN=$RUNNER_TEMP/margin-signing.keychain-db" >> "$GITHUB_ENV"
       - name: Build DMG
         run: ./scripts/package-dmg.sh
       - name: Generate signed update feed

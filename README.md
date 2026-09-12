@@ -64,7 +64,7 @@
     <td valign="top" align="center">
       <h4>🔒 Private by default</h4>
       No accounts, analytics, ads, or telemetry.<br>
-      Note bodies encrypted locally — key stays in Keychain.
+      Note bodies encrypted locally — key stays on your Mac.
     </td>
     <td valign="top" align="center">
       <h4>📤 Share as Markdown</h4>
@@ -119,7 +119,7 @@ Customize all bindings in **Settings → Shortcuts**.
 
 <div align="center">
 
-🔐 **Encrypted locally** — note bodies and formatting are encrypted; the key never leaves macOS Keychain.
+🔐 **Encrypted locally** — note bodies and formatting are encrypted; the key is stored in a user-only local file.
 
 🚫 No accounts &nbsp;·&nbsp; No analytics &nbsp;·&nbsp; No ads &nbsp;·&nbsp; No telemetry
 
@@ -180,5 +180,4 @@ python3 scripts/check-build-workflow.py
   <a href="docs/RELEASING.md">Releasing</a> &nbsp;·&nbsp;
   <a href="https://github.com/valetivivek/Margin/issues">Report an issue</a>
 </p>
-
 

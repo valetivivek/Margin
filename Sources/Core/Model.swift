@@ -225,11 +225,12 @@ final class AppSettings: ObservableObject {
 }
 
 private enum StoreError: LocalizedError {
-    case sqlite(String), keychain(OSStatus), corruptNote
+    case sqlite(String), keychain(OSStatus), keyFile(String), corruptNote
     var errorDescription: String? {
         switch self {
         case .sqlite(let message): message
         case .keychain(let status): "Keychain error \(status)"
+        case .keyFile(let message): message
         case .corruptNote: "A note could not be decrypted."
         }
     }
@@ -237,31 +238,42 @@ private enum StoreError: LocalizedError {
 
 private final class CryptoBox {
     private let key: SymmetricKey
-    init(service: String = "app.margin.local-key", keyData: Data? = nil) throws {
+    init(keyURL: URL, legacyService: String = "app.margin.local-key", migrateLegacyKey: Bool, keyData: Data? = nil) throws {
         if let keyData { key = SymmetricKey(data: keyData); return }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: "note-body-key",
-            kSecReturnData as String: true
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecSuccess, let data = item as? Data {
+
+        let files = FileManager.default
+        if files.fileExists(atPath: keyURL.path) {
+            let data = try Data(contentsOf: keyURL)
+            guard data.count == 32 else { throw StoreError.keyFile("Margin's local encryption key is invalid.") }
+            try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
             key = SymmetricKey(data: data)
             return
         }
-        guard status == errSecItemNotFound else { throw StoreError.keychain(status) }
-        var data = Data(count: 32)
-        let randomStatus = data.withUnsafeMutableBytes { bytes in
-            SecRandomCopyBytes(kSecRandomDefault, 32, bytes.baseAddress!)
+
+        let data: Data
+        if migrateLegacyKey {
+            // Migrate the old key once. Keeping the Keychain item provides a recovery fallback.
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: legacyService,
+                kSecAttrAccount as String: "note-body-key",
+                kSecReturnData as String: true
+            ]
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            if status == errSecSuccess, let migrated = item as? Data {
+                data = migrated
+            } else if status == errSecItemNotFound {
+                data = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+            } else {
+                throw StoreError.keychain(status)
+            }
+        } else {
+            data = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
         }
-        guard randomStatus == errSecSuccess else { throw StoreError.keychain(randomStatus) }
-        var add = query
-        add.removeValue(forKey: kSecReturnData as String)
-        add[kSecValueData as String] = data
-        let addStatus = SecItemAdd(add as CFDictionary, nil)
-        guard addStatus == errSecSuccess else { throw StoreError.keychain(addStatus) }
+        guard data.count == 32 else { throw StoreError.keyFile("Margin's migrated encryption key is invalid.") }
+        try data.write(to: keyURL, options: .atomic)
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
         key = SymmetricKey(data: data)
     }
 
@@ -284,12 +296,18 @@ final class NoteDatabase {
     private let crypto: CryptoBox
 
     init(directory: URL? = nil, keyService: String = "app.margin.local-key", keyData: Data? = nil) throws {
-        crypto = try CryptoBox(service: keyService, keyData: keyData)
         let folder = try directory ?? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
         ).appendingPathComponent("Margin", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
         let url = folder.appendingPathComponent("notes.sqlite3")
+        crypto = try CryptoBox(
+            keyURL: folder.appendingPathComponent("note-body.key"),
+            legacyService: keyService,
+            migrateLegacyKey: FileManager.default.fileExists(atPath: url.path),
+            keyData: keyData
+        )
         guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
             throw StoreError.sqlite("Could not open the note store.")
         }
@@ -679,6 +697,20 @@ enum SelfCheck {
         let archive = try JSONEncoder.hmn.encode(StickyArchive(notes: changed))
         let imported = try JSONDecoder.hmn.decode(StickyArchive.self, from: archive)
         precondition(imported.notes[0].title == "Round trip")
+
+        let localKeyFolder = FileManager.default.temporaryDirectory.appendingPathComponent("margin-key-check-\(UUID().uuidString)")
+        let localKeyService = "app.margin.key-check.\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: localKeyFolder) }
+        do {
+            let localKeyDB = try NoteDatabase(directory: localKeyFolder, keyService: localKeyService)
+            try localKeyDB.save(Note(title: "Local key", body: "survives relaunch"))
+        }
+        let keyURL = localKeyFolder.appendingPathComponent("note-body.key")
+        let keyMode = try FileManager.default.attributesOfItem(atPath: keyURL.path)[.posixPermissions] as? NSNumber
+        let reopenedKeyDB = try NoteDatabase(directory: localKeyFolder, keyService: localKeyService)
+        guard keyMode?.intValue == 0o600, try reopenedKeyDB.load().first?.body == "survives relaunch" else {
+            throw SelfCheckFailure("The local encryption key is not private or persistent")
+        }
 
         note.deletedAt = Date()
         try db.save(note)

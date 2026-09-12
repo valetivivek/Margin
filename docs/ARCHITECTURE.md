@@ -12,7 +12,7 @@ Margin is a native AppKit application with SwiftUI content. It compiles directly
 
 `AppCoordinator` connects windows to a shared `NotesStore`. `EdgePanelController` owns each screen-edge panel, while `StickyWindowController` owns editable notes. Ordinary edits are debounced and pending text is flushed before a note closes or the app terminates for an update.
 
-Local note bodies are encrypted with AES-GCM before SQLite persistence. The key is stored in macOS Keychain. Optional sync owns Markdown conversion, conflict resolution, tombstones, and atomic file writes behind `CloudSyncEngine.sync(local:folder:)`.
+Local note bodies are encrypted with AES-GCM before SQLite persistence. The key is stored at `~/Library/Application Support/Margin/note-body.key` with user-only permissions. On the first upgraded launch, Margin copies an existing legacy key from macOS Keychain and retains that item as a recovery fallback. Optional sync owns Markdown conversion, conflict resolution, tombstones, and atomic file writes behind `CloudSyncEngine.sync(local:folder:)`.
 
 Sparkle checks the signed GitHub Releases appcast and installs EdDSA-verified updates. Its automatic checks and downloads are controlled directly through Sparkle's user defaults from **Settings → About**.
 

@@ -8,14 +8,6 @@ case "$MODE" in
   *) print -u2 "Usage: $0 [--build-only | --install]"; exit 2 ;;
 esac
 [[ $# -le 1 ]] || { print -u2 "Expected at most one build mode"; exit 2; }
-if [[ "$MODE" != --build-only && -z "${CODE_SIGN_IDENTITY:-}" ]]; then
-  print -u2 "Production builds require CODE_SIGN_IDENTITY so Keychain access survives app updates."
-  exit 1
-fi
-if [[ "$MODE" == release && -z "${NOTARY_PROFILE:-}" ]]; then
-  print -u2 "Public releases require NOTARY_PROFILE for Developer ID notarization."
-  exit 1
-fi
 # Prefer full Xcode when Command Line Tools is selected; SwiftUI needs its plugins.
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -87,7 +79,7 @@ cp -R "$ROOT/Resources/Fonts/." "$APP/Contents/Resources/Fonts/"
 cp "$SPARKLE_ROOT/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
 "$ROOT/scripts/package-icon.sh" "$APP/Contents/Resources/AppIcon.icns"
-if [[ "$MODE" != --build-only ]]; then
+if [[ "$MODE" != --build-only && -n "${CODE_SIGN_IDENTITY:-}" ]]; then
   embedded="$APP/Contents/Frameworks/Sparkle.framework"
   signing=(--force --sign "$CODE_SIGN_IDENTITY" --options runtime)
   [[ "$MODE" != release ]] || signing+=(--timestamp)
@@ -101,15 +93,6 @@ else
   codesign --force --sign - "$APP"
 fi
 codesign --verify --deep --strict "$APP"
-signature="$(codesign -dvvv "$APP" 2>&1)"
-if [[ "$MODE" != --build-only && "$signature" == *"Signature=adhoc"* ]]; then
-  print -u2 "Production builds cannot use an ad-hoc signature."
-  exit 1
-fi
-if [[ "$MODE" == release && "$signature" != *"Authority=Developer ID Application:"* ]]; then
-  print -u2 "Public releases must use a Developer ID Application certificate."
-  exit 1
-fi
 "$APP/Contents/MacOS/Margin" --self-check
 
 # Replace only after compilation, bundle verification and self-check all pass.
@@ -153,7 +136,7 @@ ln -s /Applications "$STAGE/dmg/Applications"
 hdiutil create -ov -format UDZO -volname "Margin $VERSION" -srcfolder "$STAGE/dmg" "$STAGE/$NAME"
 hdiutil verify "$STAGE/$NAME"
 
-if [[ "$MODE" == release ]]; then
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
   notary=(--keychain-profile "$NOTARY_PROFILE" --wait)
   [[ -z "${NOTARY_KEYCHAIN:-}" ]] || notary+=(--keychain "$NOTARY_KEYCHAIN")
   xcrun notarytool submit "$STAGE/$NAME" "${notary[@]}"

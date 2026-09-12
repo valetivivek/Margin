@@ -1,6 +1,6 @@
 # Margin Privacy Policy
 
-Last updated: September 8, 2026
+Last updated: September 12, 2026
 
 This policy covers the Margin macOS app distributed through the [Margin GitHub repository](https://github.com/valetivivek/Margin) and its direct-download releases. The project is maintained by Vivek Valeti, based in the United States. It does not cover independent forks or services you open from the app.
 
@@ -10,7 +10,7 @@ Margin does not require an account and does not include advertising, analytics, 
 
 ## Notes and preferences
 
-Margin stores notes in `~/Library/Application Support/Margin/notes.sqlite3`, with associated SQLite journal files. Note bodies and presentation data, including rich-text formatting, are encrypted using AES-GCM. The key is stored in macOS Keychain. **The entire database is not encrypted:** note titles, identifiers, timestamps, colour identifiers, archive/deletion state, ordering, and window positions are stored as metadata without application-level encryption.
+Margin stores notes in `~/Library/Application Support/Margin/notes.sqlite3`, with associated SQLite journal files. Note bodies and presentation data, including rich-text formatting, are encrypted using AES-GCM. The key is stored beside the database as `note-body.key`; Margin restricts the folder and key file to the current macOS user. When upgrading from an older release, Margin reads the previous key from macOS Keychain once, copies it to the local key file, and retains the Keychain item as a recovery fallback. **The entire database is not encrypted:** note titles, identifiers, timestamps, colour identifiers, archive/deletion state, ordering, and window positions are stored as metadata without application-level encryption.
 
 Preferences such as theme, shortcuts, calendar-wing placement, and editor settings are stored using macOS preferences. Margin must decrypt note bodies in memory to display or edit them. Device backups, other software with sufficient access, and your operating-system security settings affect protection of local files.
 
@@ -38,7 +38,7 @@ Copying content places it on the system clipboard. Files and clipboard contents 
 
 ## Retention and deletion
 
-Notes and preferences remain on your Mac until removed. Archiving retains a note. **Delete removes a note from the visible library but retains its stored record and content with a deletion marker.** The short Undo period is not a permanent-erasure deadline. Uninstalling the application alone does not necessarily remove its database, preferences, Keychain entry, exported files, or backups.
+Notes and preferences remain on your Mac until removed. Archiving retains a note. **Delete removes a note from the visible library but retains its stored record and content with a deletion marker.** The short Undo period is not a permanent-erasure deadline. Uninstalling the application alone does not necessarily remove its database, local encryption key, legacy Keychain entry, preferences, exported files, or backups.
 
 For local removal instructions, read [Data deletion and backups](DATA-DELETION.md). Margin has no app account or developer-hosted note database to delete. Calendar events can be edited or deleted through Margin, macOS Calendar, or their provider.
 

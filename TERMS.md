@@ -1,6 +1,6 @@
 # Margin — License and Use Information
 
-Last updated: September 8, 2026
+Last updated: September 12, 2026
 
 Margin is maintained by Vivek Valeti, based in the United States, and distributed through its GitHub project. This document explains use of the direct-download app; it does not replace the [MIT License](LICENSE) or add restrictions to the rights that license grants.
 
@@ -14,7 +14,7 @@ You retain whatever rights you have in your notes and calendar information. Usin
 
 ## Storage and backups
 
-Keep backups of important notes. Local encryption is not a backup service. Exported copies are readable, and losing the Keychain encryption key can make encrypted note bodies unrecoverable. The app's Delete action does not permanently erase the stored record; see [Data deletion and backups](DATA-DELETION.md).
+Keep backups of important notes. Local encryption is not a backup service. Exported copies are readable, and losing both the local encryption key and any legacy Keychain fallback can make encrypted note bodies unrecoverable. The app's Delete action does not permanently erase the stored record; see [Data deletion and backups](DATA-DELETION.md).
 
 ## Calendar and other services
 

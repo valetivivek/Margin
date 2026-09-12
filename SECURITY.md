@@ -8,9 +8,9 @@ Include the affected Margin version, macOS version, impact, and a minimal reprod
 
 ## Security boundaries
 
-Note bodies and presentation data use AES-GCM with a key in macOS Keychain. Titles and other database metadata are not encrypted by Margin. Displayed content is decrypted in memory. Exported files and temporary sharing copies are readable. Delete retains a database record; see DATA-DELETION.md.
+Note bodies and presentation data use AES-GCM with a key stored in Margin's user-only Application Support folder. Older installations migrate their existing macOS Keychain key once and retain that item as a recovery fallback. Any process running as the same macOS user with access to that folder can read the local key, so FileVault, a strong login password, and normal macOS account security remain important. Titles and other database metadata are not encrypted by Margin. Displayed content is decrypted in memory. Exported files and temporary sharing copies are readable. Delete retains a database record; see DATA-DELETION.md.
 
-Calendar access is optional. Margin reads events and saves new events only after the user submits the New Event form. Calendar authentication and provider synchronization are managed by macOS. Updates use Sparkle with the project's configured update-signing key. Developer ID signing, notarization, and release-hosting security must be verified for each public release; a local development build is not evidence of notarization.
+Calendar access is optional. Margin reads events and saves new events only after the user submits the New Event form. Calendar authentication and provider synchronization are managed by macOS. Updates use Sparkle with the project's configured update-signing key. Free direct-download builds are ad-hoc code signed and are not notarized by Apple, so macOS may require the user to approve the first launch.
 
 ## Updates
 
