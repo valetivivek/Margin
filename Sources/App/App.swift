@@ -546,6 +546,10 @@ final class AppCoordinator {
         settings.onChange = { [weak self] in DispatchQueue.main.async {
             guard let self else { return }
             NSApp.appearance = self.settings.appearance.nsAppearance
+            if !self.settings.calendarEnabled {
+                self.calendarWindow?.close()
+                self.calendarWindow = nil
+            }
             self.refreshPanels()
         } }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.rebuildPanels() }
@@ -716,6 +720,7 @@ final class AppCoordinator {
     func showArchive() { showAllNotes(filter: .archived) }
 
     func showCalendar() {
+        guard settings.calendarEnabled else { return }
         if let calendarWindow { calendarWindow.window?.makeKeyAndOrderFront(nil); return }
         let pointer = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(pointer) } ?? NSScreen.main!
@@ -938,6 +943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        menu.item(withTitle: "Calendar…")?.isEnabled = settings.calendarEnabled
         leftSideItem?.state = settings.side == .left ? .on : .off
         rightSideItem?.state = settings.side == .right ? .on : .off
         bottomSideItem?.state = settings.side == .bottom ? .on : .off
@@ -1036,13 +1042,17 @@ enum AppSelfCheck {
         }
         settings.calendarEnabled = false
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        guard calendar.isVisible else {
-            throw SelfCheckFailure("Turning off the calendar wing turns off Margin Calendar")
+        guard !calendar.isVisible else {
+            throw SelfCheckFailure("Turning off Calendar leaves its window open")
         }
-        calendar.close()
+        coordinator.showCalendar()
+        guard !NSApp.windows.contains(where: { $0.title == "Calendar" && $0.isVisible }) else {
+            throw SelfCheckFailure("Margin Calendar opens while disabled")
+        }
+        settings.calendarEnabled = true
         coordinator.showCalendar()
         guard NSApp.windows.contains(where: { $0.title == "Calendar" && $0.isVisible }) else {
-            throw SelfCheckFailure("Margin Calendar cannot reopen while its deck wing is hidden")
+            throw SelfCheckFailure("Margin Calendar cannot reopen after being enabled")
         }
         NSApp.windows.first(where: { $0.title == "Calendar" })?.close()
         deck.setExpanded(true)

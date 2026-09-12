@@ -1,12 +1,29 @@
 # Releasing Margin
 
-Update the short version and build number in `Info.plist`, then add detailed release notes under a matching `## VERSION - DATE` heading in `CHANGELOG.md`. The release workflow uses that section as the published GitHub release description. Then run:
+Update the short version and build number in `Info.plist`, then add detailed release notes under a matching `## VERSION - DATE` heading in `CHANGELOG.md`. The release workflow uses that section as the published GitHub release description. Public releases must use the same Developer ID Application identity on every build so macOS Keychain recognizes Margin after an update.
+
+Configure these GitHub Actions secrets before releasing:
+
+- `APPLE_CERTIFICATE_BASE64`: a base64-encoded Developer ID Application `.p12`
+- `APPLE_CERTIFICATE_PASSWORD`: the `.p12` export password
+- `KEYCHAIN_PASSWORD`: a random password used only for the temporary CI keychain
+- `APPLE_ID`, `APPLE_APP_PASSWORD`, and `APPLE_TEAM_ID`: notarization credentials
+
+Then run:
 
 ```sh
 ./scripts/package-dmg.sh
 ```
 
-For local development, use `./scripts/package-dmg.sh --build-only`; use `--install` after quitting Margin to update `/Applications/Margin.app`. These modes do not create a DMG. A failed build leaves the previous verified app intact.
+For local development, use `./scripts/package-dmg.sh --build-only`. It creates the isolated, ad-hoc-signed `Margin Dev.app`, which never reads production notes or their Keychain key.
+
+To update `/Applications/Margin.app` locally, quit Margin and provide a persistent signing identity:
+
+```sh
+CODE_SIGN_IDENTITY="Margin Local Development" ./scripts/package-dmg.sh --install
+```
+
+An Apple Development or self-signed Code Signing certificate is sufficient for this local-only command, provided every local production build uses the same certificate. It is not suitable for a public release or notarization. A failed build leaves the previous verified app intact.
 
 Without arguments, the script builds and checks both architectures, verifies the app signature and DMG, and writes a SHA-256 checksum. Push a matching tag such as `v1.0.3`; the release workflow publishes the DMG, checksum, and signed update feed.
 
@@ -20,7 +37,7 @@ gh secret set SPARKLE_PRIVATE_KEY < /private/tmp/margin-sparkle-key
 rm /private/tmp/margin-sparkle-key
 ```
 
-Ad hoc signing is suitable for local and public testing but may show a first-launch Gatekeeper prompt. Trusted distribution requires a Developer ID Application certificate and notarization credentials:
+Ad-hoc signing is limited to the isolated development app. Apple requires a Developer ID Application certificate and notarization for direct public distribution:
 
 ```sh
 CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
@@ -29,3 +46,5 @@ NOTARY_PROFILE="margin-notary" \
 ```
 
 Never commit certificates, passwords, or notarization credentials.
+
+The first Developer ID-signed update replaces the identity used by older ad-hoc releases, so users must choose **Always Allow** once in the Keychain prompt. Later updates signed by the same Developer ID do not require another approval. Do not delete the `app.margin.local-key` item to clear old permissions; it contains the only key capable of decrypting existing note bodies.

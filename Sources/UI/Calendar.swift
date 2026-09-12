@@ -69,6 +69,12 @@ enum CalendarAlerts {
 
 final class CalendarAgenda: ObservableObject {
     private let store = EKEventStore()
+    var enabled = true {
+        didSet {
+            guard enabled != oldValue, !enabled else { return }
+            calendars = []; events = []; refreshed = nil
+        }
+    }
     @Published var date = Date()
     @Published var calendarIDs: [String]
     @Published private(set) var calendars: [EKCalendar] = []
@@ -147,7 +153,7 @@ final class CalendarAgenda: ObservableObject {
     }
 
     func requestAccess() {
-        guard !requesting else { return }
+        guard enabled, !requesting else { return }
         requesting = true
         let completion: (Bool, Error?) -> Void = { [weak self] _, error in
             DispatchQueue.main.async {
@@ -179,6 +185,7 @@ final class CalendarAgenda: ObservableObject {
     }
 
     func refresh() {
+        guard enabled else { return }
         let status = EKEventStore.authorizationStatus(for: .event)
         if #available(macOS 14, *) { authorized = status == .fullAccess }
         else { authorized = status == .authorized }

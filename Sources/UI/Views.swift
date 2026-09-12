@@ -2233,26 +2233,30 @@ struct SettingsView: View {
 
     private var calendarSettings: some View {
         VStack(alignment: .leading, spacing: 14) {
-            settingsSection("Calendar wing") {
-                settingRow("Calendar wing", "Show or hide the calendar in the deck") {
-                    Toggle("Calendar wing", isOn: $settings.calendarEnabled).toggleStyle(.switch).labelsHidden().tint(accent)
+            settingsSection("Calendar") {
+                settingRow("Calendar", "Show Calendar features and the widget in the deck") {
+                    Toggle("Calendar", isOn: $settings.calendarEnabled).toggleStyle(.switch).labelsHidden().tint(accent)
                 }
-                settingRow("Wing position", "Choose an end, or drag the wing directly between notes") {
-                    AccentSegmentedPicker(selection: $settings.calendarPosition,
-                                          options: [(0, "Top"), (Int.max, "Bottom")],
-                                          accessibilityLabel: "Calendar wing position",
-                                          accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark))
-                        .frame(width: 150, height: 30).disabled(!settings.calendarEnabled)
-                }
-                settingRow("Calendar color", "Used for the wing and calendar window", divider: false) {
-                    HStack(spacing: 4) {
-                        ForEach(NoteColor.allCases, id: \.rawValue) { value in
-                            swatch(value.color, selected: settings.calendarColor == value, label: "\(value.name) calendar color") {
-                                settings.calendarColor = value
+                Group {
+                    settingRow("Widget position", "Choose an end, or drag the widget directly between notes") {
+                        AccentSegmentedPicker(selection: $settings.calendarPosition,
+                                              options: [(0, "Top"), (Int.max, "Bottom")],
+                                              accessibilityLabel: "Calendar widget position",
+                                              accent: settings.interfaceColor.nsColor(isDark: colorScheme == .dark))
+                            .frame(width: 150, height: 30)
+                    }
+                    settingRow("Calendar color", "Used for the widget and calendar window", divider: false) {
+                        HStack(spacing: 4) {
+                            ForEach(NoteColor.allCases, id: \.rawValue) { value in
+                                swatch(value.color, selected: settings.calendarColor == value, label: "\(value.name) calendar color") {
+                                    settings.calendarColor = value
+                                }
                             }
                         }
                     }
                 }
+                .disabled(!settings.calendarEnabled)
+                .opacity(settings.calendarEnabled ? 1 : 0.42)
             }
             settingsSection("Calendar access") {
                 if calendarAgenda.authorized {
@@ -2295,13 +2299,11 @@ struct SettingsView: View {
                     }
                 }
             }
+            .disabled(!settings.calendarEnabled)
+            .opacity(settings.calendarEnabled ? 1 : 0.42)
         }
-        .onAppear {
-            calendarAgenda.calendarIDs = settings.calendarVisibleIDs; calendarAgenda.refresh()
-            if !primaryCalendarOptions.contains(where: { $0.0 == settings.calendarID }) {
-                settings.calendarID = primaryCalendarOptions.first?.0 ?? ""
-            }
-        }
+        .onAppear { refreshCalendarSettings() }
+        .onChange(of: settings.calendarEnabled) { _ in refreshCalendarSettings() }
     }
 
     private var calendarSelectionLabel: String {
@@ -2320,6 +2322,16 @@ struct SettingsView: View {
         if settings.calendarVisibleIDs.isEmpty { settings.calendarVisibleIDs = [id] }
         else if settings.calendarVisibleIDs.contains(id) { settings.calendarVisibleIDs.removeAll { $0 == id } }
         else { settings.calendarVisibleIDs.append(id) }
+    }
+
+    private func refreshCalendarSettings() {
+        calendarAgenda.calendarIDs = settings.calendarVisibleIDs
+        calendarAgenda.enabled = settings.calendarEnabled
+        guard settings.calendarEnabled else { return }
+        calendarAgenda.refresh()
+        if !primaryCalendarOptions.contains(where: { $0.0 == settings.calendarID }) {
+            settings.calendarID = primaryCalendarOptions.first?.0 ?? ""
+        }
     }
 
     private var notes: some View {

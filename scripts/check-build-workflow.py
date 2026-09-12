@@ -18,6 +18,14 @@ assert (app / 'Contents/MacOS/Margin').exists(), 'Run --build-only first'
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
 assert info['CFBundleIdentifier'] == 'com.valetivivek.margin.dev'
 assert info['CFBundleDisplayName'] == 'Margin Dev'
+unsigned_env = dict(os.environ)
+unsigned_env.pop('CODE_SIGN_IDENTITY', None)
+unsigned_env.pop('NOTARY_PROFILE', None)
+for mode in ([], ['--install']):
+    result = subprocess.run([str(root / 'scripts/package-dmg.sh'), *mode],
+                            env=unsigned_env, capture_output=True, text=True)
+    assert result.returncode != 0, f'Unsigned production mode {mode or ["release"]} was allowed'
+    assert 'require CODE_SIGN_IDENTITY' in result.stderr
 before = fingerprint()
 with tempfile.TemporaryDirectory(prefix='margin-build-check-') as folder:
     xcrun = Path(folder) / 'xcrun'

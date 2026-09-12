@@ -8,6 +8,14 @@ case "$MODE" in
   *) print -u2 "Usage: $0 [--build-only | --install]"; exit 2 ;;
 esac
 [[ $# -le 1 ]] || { print -u2 "Expected at most one build mode"; exit 2; }
+if [[ "$MODE" != --build-only && -z "${CODE_SIGN_IDENTITY:-}" ]]; then
+  print -u2 "Production builds require CODE_SIGN_IDENTITY so Keychain access survives app updates."
+  exit 1
+fi
+if [[ "$MODE" == release && -z "${NOTARY_PROFILE:-}" ]]; then
+  print -u2 "Public releases require NOTARY_PROFILE for Developer ID notarization."
+  exit 1
+fi
 # Prefer full Xcode when Command Line Tools is selected; SwiftUI needs its plugins.
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -79,18 +87,29 @@ cp -R "$ROOT/Resources/Fonts/." "$APP/Contents/Resources/Fonts/"
 cp "$SPARKLE_ROOT/LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
 ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
 "$ROOT/scripts/package-icon.sh" "$APP/Contents/Resources/AppIcon.icns"
-if [[ -n "${CODE_SIGN_IDENTITY:-}" ]]; then
+if [[ "$MODE" != --build-only ]]; then
   embedded="$APP/Contents/Frameworks/Sparkle.framework"
-  codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime "$embedded/Versions/B/XPCServices/Installer.xpc"
-  codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --preserve-metadata=entitlements "$embedded/Versions/B/XPCServices/Downloader.xpc"
-  codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime "$embedded/Versions/B/Autoupdate"
-  codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime "$embedded/Versions/B/Updater.app"
-  codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime "$embedded"
-  codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$APP"
+  signing=(--force --sign "$CODE_SIGN_IDENTITY" --options runtime)
+  [[ "$MODE" != release ]] || signing+=(--timestamp)
+  codesign "${signing[@]}" "$embedded/Versions/B/XPCServices/Installer.xpc"
+  codesign "${signing[@]}" --preserve-metadata=entitlements "$embedded/Versions/B/XPCServices/Downloader.xpc"
+  codesign "${signing[@]}" "$embedded/Versions/B/Autoupdate"
+  codesign "${signing[@]}" "$embedded/Versions/B/Updater.app"
+  codesign "${signing[@]}" "$embedded"
+  codesign "${signing[@]}" "$APP"
 else
   codesign --force --sign - "$APP"
 fi
 codesign --verify --deep --strict "$APP"
+signature="$(codesign -dvvv "$APP" 2>&1)"
+if [[ "$MODE" != --build-only && "$signature" == *"Signature=adhoc"* ]]; then
+  print -u2 "Production builds cannot use an ad-hoc signature."
+  exit 1
+fi
+if [[ "$MODE" == release && "$signature" != *"Authority=Developer ID Application:"* ]]; then
+  print -u2 "Public releases must use a Developer ID Application certificate."
+  exit 1
+fi
 "$APP/Contents/MacOS/Margin" --self-check
 
 # Replace only after compilation, bundle verification and self-check all pass.
@@ -134,9 +153,10 @@ ln -s /Applications "$STAGE/dmg/Applications"
 hdiutil create -ov -format UDZO -volname "Margin $VERSION" -srcfolder "$STAGE/dmg" "$STAGE/$NAME"
 hdiutil verify "$STAGE/$NAME"
 
-if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-  [[ -n "${CODE_SIGN_IDENTITY:-}" ]] || { print -u2 "NOTARY_PROFILE requires CODE_SIGN_IDENTITY"; exit 1; }
-  xcrun notarytool submit "$STAGE/$NAME" --keychain-profile "$NOTARY_PROFILE" --wait
+if [[ "$MODE" == release ]]; then
+  notary=(--keychain-profile "$NOTARY_PROFILE" --wait)
+  [[ -z "${NOTARY_KEYCHAIN:-}" ]] || notary+=(--keychain "$NOTARY_KEYCHAIN")
+  xcrun notarytool submit "$STAGE/$NAME" "${notary[@]}"
   xcrun stapler staple "$STAGE/$NAME"
 fi
 

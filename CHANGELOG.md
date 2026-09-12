@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.4 - 2026-09-11
+
+- Require stable Developer ID signing and notarization for production releases so macOS Keychain can recognize Margin across updates instead of authorizing every ad-hoc build separately.
+- Import and verify release signing credentials in CI, while keeping the isolated development app ad-hoc signed and separate from production notes.
+- Make the Calendar switch control the entire integration: it now disables and dims Calendar settings, closes and blocks the Calendar window, disables its menu action, and stops calendar data refreshes while off.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.4.3 - 2026-09-11
 
 - Reworked event creation with a focused form, one-click creation from empty dates, sensible default times, and an at-time alert by default.
