@@ -1,11 +1,12 @@
 # Changelog
 
-## 1.4.5 - 2026-09-12
+## 1.4.6 - 2026-09-12
 
 - Stop repeated Keychain password prompts by migrating the note encryption key once to a user-only local file. The old Keychain item is retained as a recovery fallback.
 - Keep note bodies encrypted with AES-GCM without requiring an Apple Developer subscription. Existing users may see one final Keychain prompt while Margin copies their current key.
 - Restore the free release workflow while retaining Sparkle signatures for update verification.
 - Include the Calendar master switch improvements from 1.4.4: turning Calendar off disables its settings and prevents Margin from accessing or displaying calendar data.
+- Make the Calendar window-close regression check reliable on headless release builders.
 
 Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
 

@@ -18,7 +18,7 @@ A failed build leaves the previous verified app intact.
 
 Without arguments, the script builds and checks both architectures, ad-hoc signs the free direct-download app, verifies the app and DMG, and writes a SHA-256 checksum. These releases are not notarized by Apple, so macOS may require users to approve the first launch. Sparkle's separate EdDSA signature authenticates updates.
 
-Push a matching tag such as `v1.4.5`; the release workflow publishes the DMG, checksum, and signed update feed. The repository and its releases must be public because installed copies of Margin cannot authenticate to a private Sparkle feed. The workflow checks this before publishing and verifies the public feed afterward.
+Push a matching tag such as `v1.4.6`; the release workflow publishes the DMG, checksum, and signed update feed. The repository and its releases must be public because installed copies of Margin cannot authenticate to a private Sparkle feed. The workflow checks this before publishing and verifies the public feed afterward.
 
 Before the first updater-enabled release, export the `com.valetivivek.margin` Sparkle key from Keychain and save it as the repository Actions secret `SPARKLE_PRIVATE_KEY`. Never commit the private key.
 
@@ -30,4 +30,4 @@ rm /private/tmp/margin-sparkle-key
 
 After the workflow succeeds, verify the GitHub release contains the DMG, checksum, and `appcast.xml`; download the public DMG; confirm its checksum; and update the Homebrew cask with that published checksum.
 
-Margin 1.4.5 migrates the note encryption key away from recurring Keychain access. Existing users may receive one final Keychain password prompt while the new version copies the old key to `~/Library/Application Support/Margin/note-body.key`. The legacy Keychain item is retained as a recovery fallback and should not be deleted until the migrated app and notes have been verified.
+Margin 1.4.6 migrates the note encryption key away from recurring Keychain access. Existing users may receive one final Keychain password prompt while the new version copies the old key to `~/Library/Application Support/Margin/note-body.key`. The legacy Keychain item is retained as a recovery fallback and should not be deleted until the migrated app and notes have been verified.

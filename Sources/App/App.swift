@@ -1041,7 +1041,7 @@ enum AppSelfCheck {
             throw SelfCheckFailure("Margin Calendar cannot open")
         }
         settings.calendarEnabled = false
-        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        RunLoop.current.run(until: Date().addingTimeInterval(settings.cardDuration + 0.2))
         guard !calendar.isVisible else {
             throw SelfCheckFailure("Turning off Calendar leaves its window open")
         }
