@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.7 - 2026-09-13
+
+- Added one-shot note reminders with presets, custom dates, contextual notification permission, and system alerts that remain scheduled when Margin is closed.
+- Added notification snooze actions for 10 minutes, one hour, and tomorrow; clicking a reminder opens its note.
+- Highlight due cards and show reminder badges in the deck, editor, and note library. Archiving or deleting a note cancels its reminder.
+- Preserve reminders in the encrypted note workflow and `.stickies` imports and exports.
+- Make pasted text automatically adopt the selected Margin text style, including its font and size, instead of importing outside formatting.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.4.6 - 2026-09-12
 
 - Stop repeated Keychain password prompts by migrating the note encryption key once to a user-only local file. The old Keychain item is retained as a recovery fallback.

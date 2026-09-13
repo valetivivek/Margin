@@ -861,6 +861,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
+        NoteReminders.register()
+        NoteReminders.restore(store.active)
         updaterController.updater.sendsSystemProfile = false
         NSApp.appearance = settings.appearance.nsAppearance
         NSApp.setActivationPolicy(Self.activationPolicy(showInDock: settings.showInDock, uiTest: AppRuntime.isTest))
@@ -885,8 +887,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        if NoteReminders.noteID(for: notification.request) != nil {
+            DispatchQueue.main.async { [weak self] in self?.store.objectWillChange.send() }
+        }
         completionHandler([.banner, .sound])
     }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        guard let noteID = NoteReminders.noteID(for: response.notification.request) else { completionHandler(); return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { completionHandler(); return }
+            if let date = NoteReminders.snoozeDate(for: response.actionIdentifier) {
+                self.store.setReminder(id: noteID, date: date)
+            } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+                self.store.objectWillChange.send()
+                self.coordinator.openEditor(noteID)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            completionHandler()
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) { store.objectWillChange.send() }
 
     static func activationPolicy(showInDock: Bool, uiTest: Bool) -> NSApplication.ActivationPolicy { showInDock ? .regular : .accessory }
 
@@ -1570,6 +1593,18 @@ enum AppSelfCheck {
         richEditor.setSelectedRange(NSRange(location: 0, length: 4))
         richEditor.format(heading: 1)
         guard richFont(0).pointSize > richEditor.noteFont.pointSize else { throw SelfCheckFailure("Heading does not enlarge selected text") }
+        let pasteEditor = ChecklistNSTextView()
+        pasteEditor.string = "Replace this"
+        pasteEditor.applyStyle()
+        pasteEditor.setSelectedRange(NSRange(location: 0, length: 7))
+        pasteEditor.format(heading: 1)
+        let selectedSize = (pasteEditor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize
+        pasteEditor.setSelectedRange(NSRange(location: 0, length: 7))
+        pasteEditor.pastePlainText("Pasted")
+        guard pasteEditor.string == "Pasted this",
+              (pasteEditor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)?.pointSize == selectedSize else {
+            throw SelfCheckFailure("Pasted text does not adopt the selected Margin formatting")
+        }
         for name in ["Virgil", "Caveat", "Helvetica"] {
             if let font = NSFont(name: name, size: 21) {
                 guard NSFontManager.shared.traits(of: NoteMarkdown.adding(.boldFontMask, to: font)).contains(.boldFontMask),

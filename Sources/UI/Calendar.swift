@@ -67,6 +67,109 @@ enum CalendarAlerts {
     }
 }
 
+enum NoteReminders {
+    static let category = "margin-reminder"
+    static let snoozeTenMinutes = "margin-reminder-snooze-10"
+    static let snoozeOneHour = "margin-reminder-snooze-60"
+    static let snoozeTomorrow = "margin-reminder-snooze-tomorrow"
+
+    static func notificationID(_ noteID: UUID) -> String { "margin-reminder-\(noteID.uuidString)" }
+
+    static func register() {
+        guard !CommandLine.arguments.contains("--self-check") else { return }
+        let actions = [
+            UNNotificationAction(identifier: snoozeTenMinutes, title: "Snooze 10 Minutes"),
+            UNNotificationAction(identifier: snoozeOneHour, title: "Snooze 1 Hour"),
+            UNNotificationAction(identifier: snoozeTomorrow, title: "Snooze Until Tomorrow")
+        ]
+        UNUserNotificationCenter.current().setNotificationCategories([
+            UNNotificationCategory(identifier: category, actions: actions, intentIdentifiers: [])
+        ])
+    }
+
+    static func schedule(_ note: Note) {
+        guard !CommandLine.arguments.contains("--self-check") else { return }
+        register()
+        let center = UNUserNotificationCenter.current()
+        let ids = [notificationID(note.id)]
+        center.removePendingNotificationRequests(withIdentifiers: ids)
+        center.removeDeliveredNotifications(withIdentifiers: ids)
+        guard let request = request(for: note) else { return }
+        let add = { center.add(request, withCompletionHandler: nil) }
+        center.getNotificationSettings { settings in
+            if settings.authorizationStatus == .notDetermined {
+                center.requestAuthorization(options: [.alert, .sound]) { allowed, _ in if allowed { add() } }
+            } else if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
+                add()
+            }
+        }
+    }
+
+    static func restore(_ notes: [Note]) {
+        guard !CommandLine.arguments.contains("--self-check") else { return }
+        let requests = notes.compactMap(request(for:))
+        guard !requests.isEmpty else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            requests.forEach { center.add($0, withCompletionHandler: nil) }
+        }
+    }
+
+    static func remove(_ noteID: UUID) {
+        guard !CommandLine.arguments.contains("--self-check") else { return }
+        let center = UNUserNotificationCenter.current()
+        let ids = [notificationID(noteID)]
+        center.removePendingNotificationRequests(withIdentifiers: ids)
+        center.removeDeliveredNotifications(withIdentifiers: ids)
+    }
+
+    static func noteID(for request: UNNotificationRequest) -> UUID? {
+        if let value = request.content.userInfo["noteID"] as? String, let id = UUID(uuidString: value) { return id }
+        let prefix = "margin-reminder-"
+        guard request.identifier.hasPrefix(prefix) else { return nil }
+        return UUID(uuidString: String(request.identifier.dropFirst(prefix.count)))
+    }
+
+    static func snoozeDate(for action: String, now: Date = Date(), calendar: Calendar = .current) -> Date? {
+        switch action {
+        case snoozeTenMinutes: now.addingTimeInterval(600)
+        case snoozeOneHour: now.addingTimeInterval(3_600)
+        case snoozeTomorrow: tomorrowMorning(from: now, calendar: calendar)
+        default: nil
+        }
+    }
+
+    static func laterToday(from now: Date = Date(), calendar: Calendar = .current) -> Date? {
+        if let five = calendar.date(bySettingHour: 17, minute: 0, second: 0, of: now), five > now { return five }
+        guard let later = calendar.date(byAdding: .hour, value: 2, to: now), calendar.isDate(later, inSameDayAs: now) else { return nil }
+        return later
+    }
+
+    static func tomorrowMorning(from now: Date = Date(), calendar: Calendar = .current) -> Date {
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow)!
+    }
+
+    static func nextWeek(from now: Date = Date(), calendar: Calendar = .current) -> Date {
+        let day = calendar.date(byAdding: .day, value: 7, to: calendar.startOfDay(for: now))!
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: day)!
+    }
+
+    private static func request(for note: Note) -> UNNotificationRequest? {
+        guard let date = note.remindAt, date > Date() else { return nil }
+        let content = UNMutableNotificationContent()
+        content.title = note.title.isEmpty ? "Margin reminder" : note.title
+        content.body = "Tap to open this note."
+        content.sound = .default
+        content.categoryIdentifier = category
+        content.userInfo = ["noteID": note.id.uuidString]
+        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        return UNNotificationRequest(identifier: notificationID(note.id), content: content,
+                                     trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false))
+    }
+}
+
 final class CalendarAgenda: ObservableObject {
     private let store = EKEventStore()
     var enabled = true {

@@ -718,9 +718,11 @@ struct EdgeDeckView: View {
                         if model.side == .right {
                             Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(.black.opacity(0.9)).lineLimit(1)
                             Spacer(minLength: 0)
+                            reminderBadge(current)
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
                         } else {
                             Text(shortAge(current.updatedAt)).font(.system(size: 9)).foregroundStyle(.black.opacity(0.42))
+                            reminderBadge(current)
                             Spacer(minLength: 0)
                             Label(current.title, systemImage: current.symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(.black.opacity(0.9)).lineLimit(1)
                         }
@@ -739,6 +741,9 @@ struct EdgeDeckView: View {
             .frame(width: DeckCardMetrics.width, height: DeckCardMetrics.height)
             .foregroundStyle(.black.opacity(0.73))
             .background(current.displayColor, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(current.reminderIsDue() ? Color.orange.opacity(0.9) : .clear, lineWidth: 3))
+            .shadow(color: current.reminderIsDue() ? Color.orange.opacity(0.45) : .clear, radius: 11)
             .modifier(CardShadow(lifted: lifted))
             .rotationEffect(.degrees(model.side == .right ? -2.2 : 2.2))
             .offset(x: model.side == .right ? offset : -offset)
@@ -759,6 +764,14 @@ struct EdgeDeckView: View {
         .contextMenu { if note.id == CalendarWing.id { Button("Open Calendar") { open(note.id) }; Button("Settings…", action: showSettings) } else { noteMenu(current) } }
         .help(current.title)
         .accessibilityLabel("\(current.title), \(current.color.name), edited \(current.updatedAt.formatted(date: .omitted, time: .shortened))")
+    }
+
+    @ViewBuilder private func reminderBadge(_ note: Note) -> some View {
+        if let date = note.remindAt {
+            Image(systemName: "clock.fill").font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(note.reminderIsDue() ? Color.orange : Color.black.opacity(0.42))
+                .help("Reminder \(date.formatted(date: .abbreviated, time: .shortened))")
+        }
     }
 
     private func activate(_ note: Note, lifted: Bool) {
@@ -1010,6 +1023,28 @@ final class ChecklistNSTextView: NSTextView {
             }
         }
         super.insertText(insertString, replacementRange: replacementRange)
+    }
+
+    override func paste(_ sender: Any?) {
+        guard let value = NSPasteboard.general.string(forType: .string) else { super.paste(sender); return }
+        pastePlainText(value)
+    }
+
+    func pastePlainText(_ value: String) {
+        beginSourceEditing()
+        let range = selectedRange()
+        if !markdownEnabled, range.length > 0, let storage = textStorage {
+            var attributes = normalTypingAttributes
+            storage.enumerateAttributes(in: range) { value, _, stop in
+                guard (value[.font] as? NSFont)?.pointSize ?? 0 >= 1 else { return }
+                for key in [NSAttributedString.Key.font, .underlineStyle, .strikethroughStyle, .baselineOffset] {
+                    attributes[key] = value[key]
+                }
+                stop.pointee = true
+            }
+            typingAttributes = attributes
+        }
+        insertText(value, replacementRange: range)
     }
 
     static func checklistShortcutRange(in text: String, before cursor: Int) -> NSRange? {
@@ -1497,6 +1532,8 @@ struct NoteEditorView: View {
     let pin: (Bool) -> Void
     @State private var note: Note
     @State private var closeHovered = false
+    @State private var showingReminder = false
+    @State private var reminderDate = Date().addingTimeInterval(3_600)
     @StateObject private var checklistEditor = ChecklistEditorHandle()
 
     init(noteID: UUID, store: NotesStore, settings: AppSettings, close: @escaping () -> Void, archive: @escaping () -> Void, delete: @escaping () -> Void, pin: @escaping (Bool) -> Void) {
@@ -1565,6 +1602,17 @@ struct NoteEditorView: View {
                     Image(systemName: "checklist").frame(width: 25, height: 25)
                 }
                 .buttonStyle(HoverButtonStyle()).accessibilityLabel("Add checklist item").help("Add a checklist item")
+                Button {
+                    reminderDate = max(note.remindAt ?? Date().addingTimeInterval(3_600), Date().addingTimeInterval(60))
+                    showingReminder = true
+                } label: {
+                    Image(systemName: note.remindAt == nil ? "clock" : "clock.fill").frame(width: 25, height: 25)
+                }
+                .buttonStyle(HoverButtonStyle())
+                .foregroundStyle(note.reminderIsDue() ? Color.orange : Color.black.opacity(0.55))
+                .accessibilityLabel(note.remindAt == nil ? "Set reminder" : "Edit reminder")
+                .help(note.remindAt.map { "Reminder \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Set reminder")
+                .popover(isPresented: $showingReminder, arrowEdge: .bottom) { reminderPopover }
                 Spacer()
                 Button("Delete", role: .destructive, action: delete).buttonStyle(MatteButtonStyle(fill: .red.opacity(0.13), foreground: Color(red: 0.62, green: 0.08, blue: 0.06), width: 58)).fixedSize()
                 Button("Mark complete", action: archive).buttonStyle(MatteButtonStyle(fill: .black.opacity(0.15), foreground: .black.opacity(0.78), width: 100)).fixedSize()
@@ -1610,6 +1658,41 @@ struct NoteEditorView: View {
 
     private func cycleColor() {
         edit(immediate: true) { $0.presentation?.colorHex = nil; $0.color = $0.color.next }
+    }
+
+    private var reminderPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Remind me").font(.system(size: 13, weight: .semibold))
+            if let date = NoteReminders.laterToday() { reminderPreset("Later today", date: date) }
+            reminderPreset("Tomorrow morning", date: NoteReminders.tomorrowMorning())
+            reminderPreset("Next week", date: NoteReminders.nextWeek())
+            Divider()
+            DatePicker("Pick date", selection: $reminderDate, in: Date().addingTimeInterval(60)...,
+                       displayedComponents: [.date, .hourAndMinute])
+            Button("Set reminder") { setReminder(reminderDate) }
+                .buttonStyle(MatteButtonStyle(fill: appAccent, foreground: appAccentForeground)).frame(maxWidth: .infinity, alignment: .trailing)
+            if let date = note.remindAt {
+                Text("Set for \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                Button("Clear reminder", role: .destructive) {
+                    if store.clearReminder(id: noteID), let latest = store.note(noteID) { note = latest; showingReminder = false }
+                }
+            }
+        }
+        .padding(12).frame(width: 270)
+    }
+
+    private func reminderPreset(_ title: String, date: Date) -> some View {
+        Button { setReminder(date) } label: {
+            HStack { Text(title); Spacer(); Text(date.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary) }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).frame(maxWidth: .infinity)
+    }
+
+    private func setReminder(_ date: Date) {
+        guard date > Date(), store.setReminder(id: noteID, date: date), let latest = store.note(noteID) else { return }
+        note = latest
+        showingReminder = false
     }
 
     private func edit(immediate: Bool = false, _ change: (inout Note) -> Void) {
@@ -1729,8 +1812,14 @@ struct AllNotesView: View {
             }.buttonStyle(HoverButtonStyle()).accessibilityLabel(selected.contains(note.id) ? "Deselect \(note.title)" : "Select \(note.title)")
             Capsule().fill(note.displayColor).frame(width: 4, height: 36)
             VStack(alignment: .leading, spacing: 4) {
-                Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    Label(note.title, systemImage: note.symbol).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    if let date = note.remindAt {
+                        Image(systemName: "clock.fill").font(.system(size: 9))
+                            .foregroundStyle(note.reminderIsDue() ? Color.orange : Color.secondary)
+                            .help("Reminder \(date.formatted(date: .abbreviated, time: .shortened))")
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 ChecklistPreviewLine(line: note.body.components(separatedBy: "\n").first ?? "", font: store.settings.nsListFont)
                     .font(store.settings.listFont).lineLimit(1).foregroundStyle(.secondary)
                 HStack(spacing: 8) {

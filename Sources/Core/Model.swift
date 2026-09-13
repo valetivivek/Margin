@@ -92,6 +92,9 @@ struct Note: Identifiable, Codable, Equatable {
     var pinX: Double?
     var pinY: Double?
     var presentation: NotePresentation?
+    var remindAt: Date?
+
+    func reminderIsDue(at date: Date = Date()) -> Bool { remindAt.map { $0 <= date } ?? false }
 }
 
 final class AppSettings: ObservableObject {
@@ -322,11 +325,15 @@ final class NoteDatabase {
             """)
         let columns = try prepare("PRAGMA table_info(note)")
         var hasPresentation = false
+        var hasReminder = false
         while sqlite3_step(columns) == SQLITE_ROW {
-            if String(cString: sqlite3_column_text(columns, 1)) == "presentation" { hasPresentation = true }
+            let name = String(cString: sqlite3_column_text(columns, 1))
+            if name == "presentation" { hasPresentation = true }
+            if name == "remind_at" { hasReminder = true }
         }
         sqlite3_finalize(columns)
         if !hasPresentation { try execute("ALTER TABLE note ADD COLUMN presentation BLOB") }
+        if !hasReminder { try execute("ALTER TABLE note ADD COLUMN remind_at REAL") }
     }
 
     deinit { sqlite3_close(db) }
@@ -350,7 +357,7 @@ final class NoteDatabase {
 
     func load(includeDeleted: Bool = false) throws -> [Note] {
         let condition = includeDeleted ? "" : " WHERE deleted IS NULL"
-        let statement = try prepare("SELECT id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y,presentation FROM note\(condition) ORDER BY sort_index")
+        let statement = try prepare("SELECT id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y,presentation,remind_at FROM note\(condition) ORDER BY sort_index")
         defer { sqlite3_finalize(statement) }
         var result: [Note] = []
         while sqlite3_step(statement) == SQLITE_ROW {
@@ -378,7 +385,8 @@ final class NoteDatabase {
                 sortIndex: sqlite3_column_double(statement, 9),
                 pinX: sqlite3_column_type(statement, 10) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 10),
                 pinY: sqlite3_column_type(statement, 11) == SQLITE_NULL ? nil : sqlite3_column_double(statement, 11),
-                presentation: presentation
+                presentation: presentation,
+                remindAt: sqlite3_column_type(statement, 13) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 13))
             ))
         }
         return result
@@ -386,11 +394,12 @@ final class NoteDatabase {
 
     func save(_ note: Note) throws {
         let sql = """
-          INSERT INTO note(id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y,presentation)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+          INSERT INTO note(id,title,body,color,pinned,created,updated,archived,deleted,sort_index,pin_x,pin_y,presentation,remind_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,color=excluded.color,
           pinned=excluded.pinned,updated=excluded.updated,archived=excluded.archived,deleted=excluded.deleted,
-          sort_index=excluded.sort_index,pin_x=excluded.pin_x,pin_y=excluded.pin_y,presentation=excluded.presentation
+          sort_index=excluded.sort_index,pin_x=excluded.pin_x,pin_y=excluded.pin_y,presentation=excluded.presentation,
+          remind_at=excluded.remind_at
           """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -412,6 +421,7 @@ final class NoteDatabase {
             let encrypted = try crypto.encrypt(String(decoding: json, as: UTF8.self))
             _ = encrypted.withUnsafeBytes { sqlite3_bind_blob(statement, 13, $0.baseAddress, Int32($0.count), sqliteTransient) }
         } else { sqlite3_bind_null(statement, 13) }
+        bind(note.remindAt, to: 14, in: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw StoreError.sqlite(String(cString: sqlite3_errmsg(db))) }
     }
 
@@ -536,7 +546,8 @@ final class NotesStore: ObservableObject {
 
     @discardableResult
     func archive(_ id: UUID) -> Bool {
-        guard edit(id, { $0.archivedAt = Date(); $0.pinned = false }) != nil else { return false }
+        guard edit(id, { $0.archivedAt = Date(); $0.pinned = false; $0.remindAt = nil }) != nil else { return false }
+        NoteReminders.remove(id)
         return flush(id)
     }
 
@@ -550,21 +561,37 @@ final class NotesStore: ObservableObject {
     func duplicate(_ id: UUID) -> Note? {
         guard var copy = note(id) else { return nil }
         copy.id = UUID(); copy.title += " copy"; copy.createdAt = Date(); copy.updatedAt = Date()
-        copy.archivedAt = nil; copy.pinned = false; copy.sortIndex = (active.map(\Note.sortIndex).max() ?? -1) + 1
+        copy.archivedAt = nil; copy.pinned = false; copy.remindAt = nil; copy.sortIndex = (active.map(\Note.sortIndex).max() ?? -1) + 1
         notes.append(copy); persist(copy)
         return copy
     }
 
     @discardableResult
+    func setReminder(id: UUID, date: Date) -> Bool {
+        guard let note = edit(id, immediate: true, { $0.remindAt = date }), saveState(id) == .saved else { return false }
+        NoteReminders.schedule(note)
+        return true
+    }
+
+    @discardableResult
+    func clearReminder(id: UUID) -> Bool {
+        NoteReminders.remove(id)
+        guard edit(id, immediate: true, { $0.remindAt = nil }) != nil else { return false }
+        return saveState(id) == .saved
+    }
+
+    @discardableResult
     func delete(_ id: UUID) -> Bool {
         guard let index = notes.firstIndex(where: { $0.id == id }), let note = note(id) else { return false }
-        var tombstone = note; tombstone.updatedAt = Date(); tombstone.deletedAt = tombstone.updatedAt
+        var removed = note; removed.remindAt = nil
+        var tombstone = removed; tombstone.updatedAt = Date(); tombstone.deletedAt = tombstone.updatedAt
         guard write(tombstone) else { return false }
+        NoteReminders.remove(id)
         pending.removeValue(forKey: id)?.cancel()
         drafts[id] = nil
         notes.remove(at: index)
         deletedRecords[id] = tombstone
-        undoNote = note
+        undoNote = removed
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
             if self?.undoNote?.id == id { self?.undoNote = nil }
         }
@@ -636,7 +663,10 @@ final class NotesStore: ObservableObject {
             for url in urls {
                 if url.pathExtension.lowercased() == "stickies" {
                     let archive = try JSONDecoder.hmn.decode(StickyArchive.self, from: Data(contentsOf: url))
-                    for var note in archive.notes { note.id = UUID(); note.sortIndex = (notes.map(\Note.sortIndex).max() ?? -1) + 1; notes.append(note); persist(note) }
+                    for var note in archive.notes {
+                        note.id = UUID(); note.sortIndex = (notes.map(\Note.sortIndex).max() ?? -1) + 1; notes.append(note); persist(note)
+                        if note.remindAt != nil { NoteReminders.schedule(note) }
+                    }
                 } else {
                     let body = try String(contentsOf: url, encoding: .utf8)
                     let note = create()
@@ -688,15 +718,25 @@ enum SelfCheck {
         try db.save(note)
         let loaded = try db.load()
         precondition(loaded.count == 1 && loaded[0].body == note.body && loaded[0].color == .mint)
+        let reminderDate = Date(timeIntervalSince1970: 1_800_000_000)
         note.presentation = NotePresentation(colorHex: 0x123456, icon: "star", richText: Data("rich body".utf8))
+        note.remindAt = reminderDate
         try db.save(note)
-        guard try db.load()[0].presentation == note.presentation else { throw SelfCheckFailure("Note colors, icons or formatting do not persist") }
+        guard try db.load()[0].presentation == note.presentation, try db.load()[0].remindAt == reminderDate else {
+            throw SelfCheckFailure("Note colors, icons, formatting or reminders do not persist")
+        }
         note.body = "changed"; try db.save(note)
         let changed = try db.load()
         precondition(changed[0].body == "changed")
         let archive = try JSONEncoder.hmn.encode(StickyArchive(notes: changed))
         let imported = try JSONDecoder.hmn.decode(StickyArchive.self, from: archive)
-        precondition(imported.notes[0].title == "Round trip")
+        guard imported.notes[0].title == "Round trip", imported.notes[0].remindAt == reminderDate else {
+            throw SelfCheckFailure("Sticky archives do not round-trip reminders")
+        }
+        guard !note.reminderIsDue(at: reminderDate.addingTimeInterval(-1)), note.reminderIsDue(at: reminderDate),
+              NoteReminders.snoozeDate(for: NoteReminders.snoozeTenMinutes, now: reminderDate) == reminderDate.addingTimeInterval(600) else {
+            throw SelfCheckFailure("Reminder firing or snoozing is incorrect")
+        }
 
         let localKeyFolder = FileManager.default.temporaryDirectory.appendingPathComponent("margin-key-check-\(UUID().uuidString)")
         let localKeyService = "app.margin.key-check.\(UUID().uuidString)"
@@ -878,12 +918,14 @@ enum SelfCheck {
         }
         store.errorMessage = nil
         store.edit(edited.id) { $0.body = "archive pending draft" }
-        guard store.archive(edited.id), store.restore(edited.id), store.note(edited.id)?.body == "archive pending draft" else {
-            throw SelfCheckFailure("Archive loses pending edits")
+        guard store.setReminder(id: edited.id, date: reminderDate), store.archive(edited.id), store.restore(edited.id),
+              store.note(edited.id)?.body == "archive pending draft", store.note(edited.id)?.remindAt == nil else {
+            throw SelfCheckFailure("Archive loses pending edits or keeps its reminder")
         }
         let survivors = store.notes.filter { $0.id != edited.id }
         store.edit(edited.id) { $0.body = "delete pending draft" }
-        guard store.delete(edited.id), store.flush(edited.id), store.note(edited.id) == nil else {
+        guard store.setReminder(id: edited.id, date: reminderDate), store.delete(edited.id), store.flush(edited.id), store.note(edited.id) == nil,
+              try editDB.load(includeDeleted: true).first(where: { $0.id == edited.id })?.remindAt == nil else {
             throw SelfCheckFailure("A pending save resurrects a deleted note")
         }
         guard store.notes == survivors,
