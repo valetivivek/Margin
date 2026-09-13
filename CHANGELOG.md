@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.8 - 2026-09-13
+
+- Redesigned note reminders with modern shortcut cards, a full-width calendar, and large trackpad-friendly time controls.
+- Added smoother reminder and month transitions while respecting the macOS Reduce Motion setting.
+- Fixed deleting a note from its editor closing other notes, and restored the Add button when the deck becomes empty.
+
+Requires macOS 13 or later. Supports Apple silicon and Intel Macs.
+
 ## 1.4.7 - 2026-09-13
 
 - Added one-shot note reminders with presets, custom dates, contextual notification permission, and system alerts that remain scheduled when Margin is closed.

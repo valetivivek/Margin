@@ -279,8 +279,14 @@ final class EdgePanelController: NSWindowController {
     }
 
     func refresh() {
+        if store.active.isEmpty {
+            model.cardGesture.end()
+            model.dragging = false
+            model.reorderingNote = nil
+        }
         guard !model.dragging else { return }
         activationWork?.cancel(); activationWork = nil
+        collapseWork?.cancel(); collapseWork = nil
         window?.collectionBehavior = DeckPlacement.collectionBehavior(overFullScreen: settings.showOverFullScreen).union([.stationary, .ignoresCycle])
         model.side = settings.side
         model.noteLimit = settings.side == .bottom
@@ -365,8 +371,9 @@ final class EdgePanelController: NSWindowController {
         guard let window else { return }
         model.expanded = expanded
         if !expanded { model.fanVisible = false }
+        let count = store.active.isEmpty ? 0 : store.active.count + (settings.calendarEnabled ? 1 : 0)
         let frame = DeckPlacement.frame(screen: screen.frame, visible: screen.visibleFrame, side: settings.side,
-                                        position: settings.deckPosition, count: min(store.active.count + (settings.calendarEnabled ? 1 : 0), model.noteLimit), expanded: expanded)
+                                        position: settings.deckPosition, count: min(count, model.noteLimit), expanded: expanded)
         window.setFrame(frame, display: true)
         if hidden { window.orderOut(nil) } else { window.orderFrontRegardless() }
     }
@@ -1014,6 +1021,8 @@ enum AppSelfCheck {
         let deck = EdgePanelController(screen: screen, store: store, settings: settings, coordinator: coordinator)
         defer { deck.close() }
         let survivorIDs = Set(store.notes.map(\.id))
+        guard let survivorID = survivorIDs.first else { throw SelfCheckFailure("No note available for the deletion window regression") }
+        coordinator.openEditor(survivorID)
         let deleted = store.create()
         coordinator.openEditor(deleted.id)
         RunLoop.current.run(until: Date().addingTimeInterval(settings.cardDuration + 0.1))
@@ -1021,11 +1030,20 @@ enum AppSelfCheck {
             .first(where: { $0.rootView.noteID == deleted.id }) else {
             throw SelfCheckFailure("Cannot open the note deletion regression editor")
         }
+        deck.setExpanded(true)
+        deck.pointerLocation = { NSPoint(x: -10_000, y: -10_000) }
+        _ = deck.setHovered(false)
         editor.rootView.delete()
         RunLoop.current.run(until: Date().addingTimeInterval(settings.cardDuration + 0.2))
         guard Set(store.notes.map(\.id)) == survivorIDs else {
             throw SelfCheckFailure("Editor deletion changes unrelated notes")
         }
+        guard NSApp.windows.contains(where: {
+            ($0.contentView as? NSHostingView<NoteEditorView>)?.rootView.noteID == survivorID && $0.isVisible
+        }) else {
+            throw SelfCheckFailure("Deleting one note closes another open note")
+        }
+        guard deck.model.expanded else { throw SelfCheckFailure("Deleting one note collapses the remaining deck") }
         coordinator.createNote()
         guard let createdID = settings.lastOpenNoteID, store.note(createdID) != nil,
               let reopened = NSApp.windows.first(where: {
@@ -1087,9 +1105,42 @@ enum AppSelfCheck {
         deck.pointerLocation = { NSPoint(x: frame.minX - 20, y: frame.minY - 20) }
         deck.setHovered(false)
         guard !deck.model.fanVisible else { throw SelfCheckFailure("The deck does not retract after a real pointer exit") }
+        deck.model.dragging = true
+        deck.model.reorderingNote = store.active.first?.id
+        store.active.forEach { store.delete($0.id) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        guard !deck.model.dragging, deck.model.reorderingNote == nil,
+              deck.window?.isVisible == true, deck.window?.frame.size == NSSize(width: 40, height: 40),
+              let hosting = deck.window?.contentView as? NSHostingView<EdgeDeckView> else {
+            throw SelfCheckFailure("The empty deck gets stuck or loses its Add button (dragging: \(deck.model.dragging), reordering: \(deck.model.reorderingNote != nil), visible: \(deck.window?.isVisible == true), size: \(String(describing: deck.window?.frame.size)))")
+        }
+        hosting.rootView.create()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        guard let createdID = settings.lastOpenNoteID, store.note(createdID) != nil,
+              NSApp.windows.contains(where: {
+                  ($0.contentView as? NSHostingView<NoteEditorView>)?.rootView.noteID == createdID && $0.isVisible
+              }) else {
+            throw SelfCheckFailure("The empty deck cannot create and open a new note")
+        }
     }
 
     static func run() throws {
+        guard NoteEditorView.roundedReminderDate(Date(timeIntervalSince1970: 900)) == Date(timeIntervalSince1970: 900),
+              NoteEditorView.roundedReminderDate(Date(timeIntervalSince1970: 901)) == Date(timeIntervalSince1970: 1_800) else {
+            throw SelfCheckFailure("Reminder times do not round to trackpad-friendly quarter hours")
+        }
+        var reminderCalendar = Calendar(identifier: .gregorian)
+        reminderCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        reminderCalendar.firstWeekday = 1
+        let september = reminderCalendar.date(from: DateComponents(year: 2026, month: 9, day: 13))!
+        let calendarDates = NoteEditorView.reminderCalendarDates(for: september, calendar: reminderCalendar)
+        guard calendarDates.count == 42,
+              reminderCalendar.component(.day, from: calendarDates[0]) == 30,
+              reminderCalendar.component(.month, from: calendarDates[0]) == 8,
+              reminderCalendar.component(.day, from: calendarDates[41]) == 10,
+              reminderCalendar.component(.month, from: calendarDates[41]) == 10 else {
+            throw SelfCheckFailure("The reminder calendar does not build a complete six-week grid")
+        }
         let hasSelectAll = AppDelegate.editCommands.contains { $0.key == "a" && $0.action == #selector(NSText.selectAll(_:)) }
         guard hasSelectAll else { throw SelfCheckFailure("Command-A is not routed to Select All") }
         if NSApp != nil {

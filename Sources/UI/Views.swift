@@ -483,7 +483,7 @@ struct EdgeDeckView: View {
     var body: some View {
         ZStack(alignment: model.side == .bottom ? .bottom : (model.side == .right ? .trailing : .leading)) {
             Color.clear
-            if deckItems.isEmpty {
+            if store.active.isEmpty {
                 deckAddButton.contextMenu { deckMenu }
             } else if model.side == .bottom {
                 if model.expanded || settings.keepOpen { bottomFan } else { bottomPill }
@@ -1523,6 +1523,7 @@ private struct NoteIconPicker: View {
 
 struct NoteEditorView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let noteID: UUID
     @ObservedObject var store: NotesStore
     @ObservedObject var settings: AppSettings
@@ -1533,7 +1534,9 @@ struct NoteEditorView: View {
     @State private var note: Note
     @State private var closeHovered = false
     @State private var showingReminder = false
+    @State private var showingCustomReminder = false
     @State private var reminderDate = Date().addingTimeInterval(3_600)
+    @State private var reminderMonth = Calendar.current.startOfDay(for: Date())
     @StateObject private var checklistEditor = ChecklistEditorHandle()
 
     init(noteID: UUID, store: NotesStore, settings: AppSettings, close: @escaping () -> Void, archive: @escaping () -> Void, delete: @escaping () -> Void, pin: @escaping (Bool) -> Void) {
@@ -1603,7 +1606,9 @@ struct NoteEditorView: View {
                 }
                 .buttonStyle(HoverButtonStyle()).accessibilityLabel("Add checklist item").help("Add a checklist item")
                 Button {
-                    reminderDate = max(note.remindAt ?? Date().addingTimeInterval(3_600), Date().addingTimeInterval(60))
+                    reminderDate = Self.roundedReminderDate(max(note.remindAt ?? Date().addingTimeInterval(3_600), Date().addingTimeInterval(60)))
+                    reminderMonth = Self.reminderMonthStart(reminderDate)
+                    showingCustomReminder = false
                     showingReminder = true
                 } label: {
                     Image(systemName: note.remindAt == nil ? "clock" : "clock.fill").frame(width: 25, height: 25)
@@ -1661,32 +1666,265 @@ struct NoteEditorView: View {
     }
 
     private var reminderPopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Remind me").font(.system(size: 13, weight: .semibold))
-            if let date = NoteReminders.laterToday() { reminderPreset("Later today", date: date) }
-            reminderPreset("Tomorrow morning", date: NoteReminders.tomorrowMorning())
-            reminderPreset("Next week", date: NoteReminders.nextWeek())
-            Divider()
-            DatePicker("Pick date", selection: $reminderDate, in: Date().addingTimeInterval(60)...,
-                       displayedComponents: [.date, .hourAndMinute])
-            Button("Set reminder") { setReminder(reminderDate) }
-                .buttonStyle(MatteButtonStyle(fill: appAccent, foreground: appAccentForeground)).frame(maxWidth: .infinity, alignment: .trailing)
-            if let date = note.remindAt {
-                Text("Set for \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
-                Button("Clear reminder", role: .destructive) {
-                    if store.clearReminder(id: noteID), let latest = store.note(noteID) { note = latest; showingReminder = false }
-                }
+        Group {
+            if showingCustomReminder {
+                customReminderPicker
+                    .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
+                                            removal: .move(edge: .trailing).combined(with: .opacity)))
+            } else {
+                quickReminderPicker
+                    .transition(.asymmetric(insertion: .move(edge: .leading).combined(with: .opacity),
+                                            removal: .move(edge: .leading).combined(with: .opacity)))
             }
         }
-        .padding(12).frame(width: 270)
+        .padding(14)
+        .frame(width: 366)
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88), value: showingCustomReminder)
     }
 
-    private func reminderPreset(_ title: String, date: Date) -> some View {
+    private var reminderHeader: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "clock.badge")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(appAccent)
+                .frame(width: 34, height: 34)
+                .background(appAccent.opacity(0.11), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Remind me").font(.system(size: 14, weight: .semibold))
+                Text("Bring this note back when it matters").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    private var quickReminderPicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            reminderHeader
+            if let date = NoteReminders.laterToday() {
+                reminderPreset("Later today", symbol: "sun.max.fill", date: date)
+            }
+            reminderPreset("Tomorrow morning", symbol: "sunrise.fill", date: NoteReminders.tomorrowMorning())
+            reminderPreset("Next week", symbol: "calendar.badge.clock", date: NoteReminders.nextWeek())
+            Button { showCustomReminder(true) } label: {
+                HStack(spacing: 11) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(appAccent)
+                        .frame(width: 30, height: 30).background(appAccent.opacity(0.10), in: Circle())
+                    Text("Choose date & time").font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10).frame(height: 48)
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(appAccent.opacity(0.24)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(HoverButtonStyle())
+            if let date = note.remindAt {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(appAccent)
+                    Text(date.formatted(date: .abbreviated, time: .shortened)).font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    Button("Clear", role: .destructive) {
+                        if store.clearReminder(id: noteID), let latest = store.note(noteID) { note = latest; showingReminder = false }
+                    }
+                    .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(.red)
+                }
+                .padding(.horizontal, 10).frame(height: 34)
+                .background(appAccent.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+        }
+    }
+
+    private var customReminderPicker: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                Button { showCustomReminder(false) } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .bold))
+                        .frame(width: 30, height: 30).background(.black.opacity(0.055), in: Circle())
+                }
+                .buttonStyle(HoverButtonStyle()).accessibilityLabel("Back to reminder shortcuts")
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Choose a time").font(.system(size: 14, weight: .semibold))
+                    Text(reminderDate.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(appAccent)
+                }
+                Spacer()
+            }
+
+            reminderCalendar
+                .padding(10)
+                .background(.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("TIME").font(.system(size: 10, weight: .bold)).tracking(0.7).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    ForEach([9, 12, 15, 18, 21], id: \.self) { hour in reminderTimeChip(hour) }
+                }
+                HStack(spacing: 8) {
+                    reminderTimeAdjustment(minutes: -15, symbol: "minus", label: "15 min")
+                        .disabled(reminderDate.addingTimeInterval(-900) <= Date())
+                    Text(reminderDate.formatted(date: .omitted, time: .shortened))
+                        .font(.system(size: 20, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .frame(maxWidth: .infinity)
+                    reminderTimeAdjustment(minutes: 15, symbol: "plus", label: "15 min")
+                }
+                .padding(8)
+                .background(.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            Button { setReminder(reminderDate) } label: {
+                Label("Set reminder", systemImage: "bell.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(appAccentForeground)
+                    .frame(maxWidth: .infinity).frame(height: 40)
+                    .background(appAccent, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            }
+            .buttonStyle(HoverButtonStyle()).disabled(reminderDate <= Date())
+        }
+    }
+
+    private func reminderPreset(_ title: String, symbol: String, date: Date) -> some View {
         Button { setReminder(date) } label: {
-            HStack { Text(title); Spacer(); Text(date.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary) }
+            HStack(spacing: 11) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(appAccent)
+                    .frame(width: 30, height: 30).background(appAccent.opacity(0.10), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 12, weight: .semibold))
+                    Text(date.formatted(.dateTime.weekday(.abbreviated).hour().minute()))
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10).frame(height: 48)
+            .background(.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.black.opacity(0.045)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(HoverButtonStyle()).frame(maxWidth: .infinity)
+    }
+
+    static func roundedReminderDate(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: ceil(date.timeIntervalSince1970 / 900) * 900)
+    }
+
+    static func reminderMonthStart(_ date: Date, calendar: Calendar = .current) -> Date {
+        calendar.date(from: calendar.dateComponents([.year, .month], from: date)) ?? date
+    }
+
+    static func reminderCalendarDates(for month: Date, calendar: Calendar = .current) -> [Date] {
+        let start = reminderMonthStart(month, calendar: calendar)
+        let leading = (calendar.component(.weekday, from: start) - calendar.firstWeekday + 7) % 7
+        let gridStart = calendar.date(byAdding: .day, value: -leading, to: start) ?? start
+        return (0..<42).compactMap { calendar.date(byAdding: .day, value: $0, to: gridStart) }
+    }
+
+    private var reminderCalendar: some View {
+        let calendar = Calendar.current
+        let month = Self.reminderMonthStart(reminderMonth)
+        let symbols = calendar.veryShortStandaloneWeekdaySymbols
+        let orderedSymbols = Array(symbols[(calendar.firstWeekday - 1)...] + symbols[..<(calendar.firstWeekday - 1)])
+        let dates = Self.reminderCalendarDates(for: month)
+        return VStack(spacing: 8) {
+            HStack {
+                Text(month.formatted(.dateTime.month(.wide).year()))
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button { changeReminderMonth(-1) } label: {
+                    Image(systemName: "chevron.left").frame(width: 30, height: 30)
+                        .background(.black.opacity(0.045), in: Circle())
+                }
+                .buttonStyle(HoverButtonStyle())
+                .disabled(calendar.compare(month, to: Self.reminderMonthStart(Date()), toGranularity: .month) != .orderedDescending)
+                .accessibilityLabel("Previous month")
+                Button { changeReminderMonth(1) } label: {
+                    Image(systemName: "chevron.right").frame(width: 30, height: 30)
+                        .background(.black.opacity(0.045), in: Circle())
+                }
+                .buttonStyle(HoverButtonStyle()).accessibilityLabel("Next month")
+            }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 4) {
+                ForEach(orderedSymbols, id: \.self) { symbol in
+                    Text(symbol.uppercased()).font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 18)
+                }
+                ForEach(dates, id: \.self) { day in reminderCalendarDay(day, month: month) }
+            }
+            .id(month)
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: reminderMonth)
+    }
+
+    private func reminderCalendarDay(_ day: Date, month: Date) -> some View {
+        let calendar = Calendar.current
+        let selected = calendar.isDate(day, inSameDayAs: reminderDate)
+        let currentMonth = calendar.isDate(day, equalTo: month, toGranularity: .month)
+        let past = day < calendar.startOfDay(for: Date())
+        return Button {
+            var parts = calendar.dateComponents([.year, .month, .day], from: day)
+            let time = calendar.dateComponents([.hour, .minute], from: reminderDate)
+            parts.hour = time.hour; parts.minute = time.minute
+            if let date = calendar.date(from: parts) {
+                reminderDate = date
+                if !currentMonth { reminderMonth = Self.reminderMonthStart(date) }
+            }
+        } label: {
+            Text(day.formatted(.dateTime.day()))
+                .font(.system(size: 11, weight: selected ? .semibold : .regular)).monospacedDigit()
+                .foregroundStyle(selected ? appAccentForeground : (currentMonth ? Color.primary.opacity(0.78) : Color.secondary.opacity(0.48)))
+                .frame(maxWidth: .infinity).frame(height: 34)
+                .background(selected ? appAccent : .clear, in: Circle())
+                .overlay(Circle().stroke(calendar.isDateInToday(day) && !selected ? appAccent.opacity(0.55) : .clear))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).frame(maxWidth: .infinity)
+        .buttonStyle(HoverButtonStyle()).disabled(past).opacity(past ? 0.34 : 1)
+        .accessibilityLabel(day.formatted(date: .complete, time: .omitted))
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    private func changeReminderMonth(_ offset: Int) {
+        let update = { reminderMonth = Calendar.current.date(byAdding: .month, value: offset, to: reminderMonth) ?? reminderMonth }
+        if reduceMotion { update() } else { withAnimation(.easeInOut(duration: 0.18), update) }
+    }
+
+    private func reminderTimeChip(_ hour: Int) -> some View {
+        var parts = Calendar.current.dateComponents([.year, .month, .day], from: reminderDate)
+        parts.hour = hour; parts.minute = 0
+        let date = Calendar.current.date(from: parts) ?? reminderDate
+        let selected = Calendar.current.component(.hour, from: reminderDate) == hour
+            && Calendar.current.component(.minute, from: reminderDate) == 0
+        return Button {
+            reminderDate = date
+        } label: {
+            Text(hour < 12 ? "\(hour) AM" : (hour == 12 ? "12 PM" : "\(hour - 12) PM"))
+                .font(.system(size: 10, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 31)
+                .foregroundStyle(selected ? appAccentForeground : Color.primary.opacity(0.72))
+                .background(selected ? appAccent : .black.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(HoverButtonStyle())
+        .disabled(date <= Date())
+        .opacity(date <= Date() ? 0.42 : 1)
+        .accessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    private func reminderTimeAdjustment(minutes: Int, symbol: String, label: String) -> some View {
+        Button { reminderDate = reminderDate.addingTimeInterval(TimeInterval(minutes * 60)) } label: {
+            VStack(spacing: 1) {
+                Image(systemName: symbol).font(.system(size: 10, weight: .bold))
+                Text(label).font(.system(size: 8, weight: .semibold))
+            }
+            .frame(width: 52, height: 39)
+            .background(.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(HoverButtonStyle())
+        .accessibilityLabel(minutes < 0 ? "15 minutes earlier" : "15 minutes later")
+    }
+
+    private func showCustomReminder(_ visible: Bool) {
+        if reduceMotion { showingCustomReminder = visible }
+        else { withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) { showingCustomReminder = visible } }
     }
 
     private func setReminder(_ date: Date) {
